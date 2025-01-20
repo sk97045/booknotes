@@ -22,8 +22,20 @@ Here are the characteristics we're striving to achieve:
  * High availability - system responds quickly even during failures.
  * High scalability - system can be scaled to support large data sets.
  * Automatic scaling - addition/deletion of servers should happen automatically based on traffic.
+ * Durability
  * Tunable consistency.
  * Low latency.
+
+## Back of the Envelope Calculations
+ * QPS: 100K/s (both read & write)
+ * Single Host use case
+ * Large Data store: 5TB per node * 1000 nodes = 5PB per node
+
+## API Design
+ * Create Table
+ * Put(K,V)
+ * Get(K) -> V
+ * Delete(K)
 
 # Single server key-value store
 Single server key-value stores are easy to develop.
@@ -86,7 +98,8 @@ To achieve high availability & reliability, data needs to be replicated on multi
 
 We can achieve that by allocating a key to multiple nodes on the hash ring:
 ![data-replication](images/data-replication.png)
-
+  * Sequence ID Generator: timestamp(8 bytes) + unique number per host(4 bytes) + unique node id(4 bytes) = 16 bytes for every key
+ 
 One caveat to keep in mind that your key might get allocated to virtual nodes mapped to the same physical node. 
 To avoid this, we can only choose unique physical nodes when replicating data.
 
@@ -212,6 +225,9 @@ Some of the tasks each node is responsible for:
  * Write requests are persisted in a commit log
  * Data is saved in the memory cache
  * When memory cache is full or reaches a given threshold, data is flushed to an SSTable on disk
+   i. SSTable store data using LSM-Tree data structure which makes the read very optimal, as the
+    data is stored using indexing in a sorted manner (instead of B+ Trees where computation is 
+    done at the read time).
 
 SSTable == Sorted String Table. Holds a sorted list of key-value pairs.
 
@@ -240,3 +256,6 @@ We covered a lot of concepts and techniques, here's a summary:
 | Handling permanent failures | Merkle tree                                           |
 | Handling data center outage | Cross-datacenter replication                          |
 
+# Artifacts
+ * Byte Byte Go System Design
+ * Exponent Course: https://www.tryexponent.com/courses/system-design-interviews/design-key-value-store
