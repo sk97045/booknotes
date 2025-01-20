@@ -45,6 +45,8 @@ Other characteristics of a good web crawler:
 ## Back of the envelope estimation
 Given 1 billion pages per month -> ~400 pages per second
 Peak QPS = 800 pages per second
+Personal experience it takes 3s to load a web page, so ~100 threads for the ~400pages.
+  - Most CPU servers say have 4 cores 8 threads so ~20servers needed.
 
 Given average web page size is 500kb -> 500 TB per month -> 30 PB for 5y.
 
@@ -134,7 +136,14 @@ In the real world, the URLs in the frontier can be millions. Putting everything 
 But putting it on disk is also slow and can cause a bottleneck for our crawling logic.
 
 We've adopted a hybrid approach where most URLs are on disk, but we maintain a buffer in-memory with URLs which are currently processed.
-We periodically flush that to disk.
+We periodically flush that to disk. 
+
+### Avoiding Duplicates
+We can fetch the result of the URLs already processed from the in-memory storage, and this way we can avoid duplicate URL processing.
+
+### Scaling
+We are going to hash the urls and distribute that load of the hash over a cluster of URL Frontier nodes, this way we can easily scale out the 
+traffic. Same URL will always go to the same Frontier node for downloading.
 
 ## HTML Downloader
 This component downloads HTML pages from the web using the HTTP protocol.
@@ -155,6 +164,14 @@ Disallow: /gp/aw/cr/
 ```
  
 We need to respect that file and avoid crawling the pages specified in there. We can cache it to avoid downloading it all the time.
+
+## Content Hashing
+We can store the hash in some distributed Redis instance in order to not process the same content across different websites. But since different websites are
+processed by different nodes so the data needs to be the same in the Redis when seen by a node. This is done via CRDT an anti-entropy protocol
+to replicate the data conflict free in a distributed way.
+ * Or we can store the hash content locally in the server disk and eventually if this server crawls a different website whose content is already processed
+   on a different server, then it should be fine as comapred to making the Redis-using CRDT which is complex.
+ * processing same data is Idempotent.
 
 ### Performance optimization
 Some performance optimizations we can consider for the HTML downloader.
@@ -195,3 +212,8 @@ Other relevant talking points:
  * Horizontal scaling - key is to keep servers stateless to enable horizontally scaling every type of server/worker/crawler/etc.
  * Availability, consistency, reliability - concepts at the core of any large system's success.
  * Analytics - We might also have to collect and analyze data in order to fine tune our system further.
+
+
+# Artifacts
+ * Byte Byte Go System Design
+ * Jordan has no life: https://www.youtube.com/watch?v=5V6Lam8GZo4&ab_channel=Jordanhasnolife
