@@ -61,7 +61,7 @@ It can be implemented either client-side, server-side or as a middleware.
 
 Client-side - Unreliable, because client requests can easily be forged by malicious actors. We also might not have control over client implementation.
 
-Server-side:
+i. Server-side:
 ![server-side-rate-limiter](images/server-side-rate-limiter.png)
   * Pros
     1. No extaa N/W Calls required to perform rate limiting
@@ -70,7 +70,7 @@ Server-side:
     1. Spam requests will consume server bandwidth
     2. Rate limiting and server are tightly coupled
 
-As a middleware between client and server:
+ii. As a middleware between client and server:
 ![middleware-rate-limiter](images/middleware-rate-limiter.png)
   * Pros
     1. Shields app server from large bursts of N/W traffic
@@ -81,7 +81,7 @@ As a middleware between client and server:
 How it works, assuming 2 requests per second are allowed:
 ![middleware-rate-limiter-example](images/middleware-rate-limiter-example.png)
 
-In cloud microservices, rate limiting is usually implemented in the API Gateway.
+iii. In cloud microservices, rate limiting is usually implemented in the API Gateway.
 This service supports rate limiting, ssl termination, authentication, IP whitelisting, serving static content, etc.
 
 So where should the rate limiter be implemented? On the server-side or in the API gateway?
