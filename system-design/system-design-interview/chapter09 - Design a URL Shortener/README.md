@@ -135,7 +135,7 @@ Events processed exactly once. If the Streaming service fails while syncing with
   * 2 Phase Commit
   * Idempotency Key: while sending the request to the database
 
-  ![tiny-url-jchannel-jordan-deep-dive](tiny_url_chaneel_jordan.png)
+  ![tiny-url-channel-jordan](tiny_url_channel_jordan.png)
 
 # Step 4 - Wrap up
 We discussed:
