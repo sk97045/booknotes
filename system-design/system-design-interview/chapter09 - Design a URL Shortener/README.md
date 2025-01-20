@@ -19,7 +19,7 @@ Other functional requirements - high availability, scalability, fault tolerance.
  * 100 mil URLs per day -> ~1200 URLs per second.
  * Assuming read-to-write ratio of 10:1 -> 12000 reads per second.
  * Assuming URL shortener will run for 10 years, we need to support 365bil records.
- * Average URL length is 100 characters
+ * Average long URL length is 100 characters
  * Storage requirements for 10y - 36.5 TB
 
 # Step 2 - Propose high-level design and get buy-in
@@ -68,6 +68,8 @@ For the hash function itself, we can either use `base62 conversion` or `hash + c
 In the latter case, we can use something like MD-5 or SHA256, but only taking the first 7 characters. To resolve collisions, we can reiterate \w an some padding to input string until there is no collision:
 ![hash-collision-mechanism](images/hash-collision-mechanism.png)
 
+Hash function: hash(long url, string userId, time requestTimestamp)
+
 The problem with this method is that we have to query the database to detect collision. Bloom filters could help in this case.
 
 Alternatively, we can use base62 conversion, which can convert an arbitrary ID into a string consisting of the 62 characters we need to support.
@@ -80,7 +82,23 @@ Comparison between the two approaches:
 | Collision is possible and needs to be resolved.                                               | Collision is not possible because ID is unique.                                                                                      |
 | It’s not possible to figure out the next available short URL because it doesn’t depend on ID. | It is easy to figure out what is the next available short URL if ID increments by 1 for a new entry. This can be a security concern. |
 
-# URL shortening deep dive
+## Scaling and Distributed nature:
+  * Single(preferred)/Multi Leader: If it is multi leader there is a possibility that two clients can get the same hash key on different machines, so we will use single leader. Even if you use Redis for better performance still the same problem of hash collision
+ exists.
+  * Paritioning for scaling: We will distirbute the hash range for ex: a-d, e-h etc. on different nodes in a consistent hasing cluster and each one of that will be single leader.
+      1. Index on short hash URLs will make the query faster (O(LogN))
+      2. Two ways of reducing collision on same node:
+        a. In case two users simultaneously try to get the same hash Key, database will do the locking and only one user will get the key, others will be locked out. 
+        b. We can already populate the database with all the possible hash keys, and when each user tries to update the row they need to acquire a lock.
+  * Database underlying algorithm choice
+       1. In Memory LSM Tree: -Read(Slow) +Writes(fast)
+       2. B-Tree(Preferred): +Reads(fast) -Writes(Slow as it is in disk writing)
+  * Cache: For faster queries and cache can be scaled too independently of DB.
+       1. Write back: Can lead to inconsitencies
+       2. Write through: Will need 2PC, will slow down writes
+       3. Write around(Preferred): Cause initial cache miss, but that is okay for us.
+
+## URL shortening deep dive
 To keep our service simple, we'll use base62 encoding for the URL shortening.
 
 Here's the whole workflow:
@@ -88,14 +106,37 @@ Here's the whole workflow:
 
 To ensure our ID generator works in a distributed environment, we can use Twitter's snowflake algorithm.
 
-# URL redirection deep dive
+## URL redirection deep dive
 We've introduced a cache as there are more reads than writes, in order to improve read performance:
 ![url-redirection-deep-dive](images/url-redirection-deep-dive.png)
  * User clicks short URL
  * Load balancer forwards the request to one of the service instances
  * If shortURL is in cache, return the longURL directly
  * Otherwise, fetch the longURL from the database and store in cache. If not found, then the short URL doesn't exist
- 
+
+## Analytics
+
+Naive solution is to just increment the counter in row {shortURL:counter} of the databse, but there will be race condition.
+
+## Stream processing
+
+Dump data somwhere and aggregate it later, multiple options
+    
+    * Database : Slow
+    * In memory mesasge broker : Not fault tolerant
+    * Log based message broker (Preferred): Write to write-ahead log, durable
+
+Processing of events in the log file
+    * HDFS + Spark: Very less frequencey and data will be out of date.
+    * Flink: real time stream processing, not required waster of resources
+    * Spark Streaming: Process events in a mini batch size
+
+Events processed exactly once. If the Streaming service fails while syncing with the database, use
+  * 2 Phase Commit
+  * Idempotency Key: while sending the request to the database
+
+  ![tiny-url-jchannel-jordan-deep-dive](tiny_url_chaneel_jordan.png)
+
 # Step 4 - Wrap up
 We discussed:
  * API design
@@ -111,3 +152,6 @@ Additional talking points:
  * Analytics - Integrating analytics tracking in our URL shortener service can reap some business insights for clients such as "how many users clicked the link".
  * Availability, consistency, reliability - At the core of every distributed systems. We'd leverage concepts already discussed in [Chapter 02](../chapter02).
 
+# Artifacts
+ * Byte Byte Go System Design
+ * Jordan has no life: https://www.youtube.com/watch?v=5V6Lam8GZo4&ab_channel=Jordanhasnolife
