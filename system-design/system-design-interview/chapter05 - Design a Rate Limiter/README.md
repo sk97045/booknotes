@@ -23,7 +23,7 @@ There are multiple techniques which you can use to implement a rate limiter, eac
 Example Candidate-Interviewer conversation:
  * C: What kind of rate limiter are we designing? Client-side or server-side?
  * I: Server-side
- * C: Does the rate limiter throttle API requests based on IP, user ID or anything else?
+ * C: Does the rate limiter throttle API requests based on IP, user ID or anything else? Can do by IP which better as otherswise blocking by User ID can make our service vulnerable to attackers.
  * I: The system should be flexible enough to support different throttling rules.
  * C: What's the scale of the system? Startup or big company?
  * I: It should handle a large number of requests.
@@ -41,6 +41,18 @@ Summary of requirements:
  * Exception handling
  * High fault tolerance - if cache server goes down, rate limiter should continue functioning.
 
+
+## Back of the Envelope Calculations
+ * 1 Bln users
+ * 20 Services to rate limit
+ * User ID = 8 Bytes, integer to keep count of track = 4 Bytes
+ * 1 BLN * 20 * (8 + 4) ~ 240 GB (Big to store on same node, need partition)
+
+## API Design
+
+ Boolean rateLimit(long UserId, String ipAddress, String serviceName, Date requestTime)
+  * returns True if request should be rate limited
+
 # Step 2 - Propose high-level design and get buy-in
 We'll stick with a simple client-server model for simplicity.
 
@@ -51,9 +63,20 @@ Client-side - Unreliable, because client requests can easily be forged by malici
 
 Server-side:
 ![server-side-rate-limiter](images/server-side-rate-limiter.png)
+  * Pros
+    1. No extaa N/W Calls required to perform rate limiting
+    2. Fewer components to manage
+  * Cons
+    1. Spam requests will consume server bandwidth
+    2. Rate limiting and server are tightly coupled
 
 As a middleware between client and server:
 ![middleware-rate-limiter](images/middleware-rate-limiter.png)
+  * Pros
+    1. Shields app server from large bursts of N/W traffic
+    2. Scales up/dowm independently
+  * Cons
+    1. Introduces extra N/W call to API servers, Although **Caching** may help here.
 
 How it works, assuming 2 requests per second are allowed:
 ![middleware-rate-limiter-example](images/middleware-rate-limiter-example.png)
@@ -131,6 +154,7 @@ How it works:
  * Time is divided in fix windows with a counter for each one
  * Each request increments the counter
  * Once the counter reaches the threshold, subsequent requests in that window are dropped
+ * Could be implemented using hash-map<userId, tuple[Date, Count]>
 ![fixed-window-counter-algo](images/fixed-window-counter-algo.png)
 
 One major problem with this approach is that a burst of traffic in the edges can allow more requests than allowed to pass through:
@@ -152,6 +176,7 @@ How it works:
  * When a request comes in, remove outdated timestamps.
  * Add timestamp of the new request in the log.
  * If the log size is same or lower than threshold, request is allowed, otherwise, it is rejected.
+ * Could be implemented using **LinkedList**, elements are removed from HEAD and inserted at TAIL.
 
 Note that the 3rd request in this example is rejected, but timestamp is still recorded in the log:
 ![sliding-window-log-algo](images/sliding-window-log-algo.png)
@@ -229,6 +254,9 @@ How will we scale the rate limited beyond a single server?
 There are several challenges to consider:
  * Race condition
  * Synchronization
+ * Scaling
+   1. Multi-Leader replication: Could increase write throughput, but at the cost of synchronization (using CRDT)
+   2. Single-Leader replication: Read/Write from Master, replica in sync with master. Sharding can help in increasing the througput.
 
 In case of race conditions, the counter might not be updated correctly when mutated by multiple instances:
 ![race-condition](images/race-condition.png)
@@ -274,3 +302,8 @@ Additional talking points if time permits:
    * Understand limit and avoid sending too many requests in a small time frame
    * Gracefully handle exceptions due to being rate limited
    * Add sufficient back-off and retry logic
+
+
+# Artifacts
+ * Byte Byte Go System Design
+ * Jordan Has No Life: https://www.youtube.com/watch?v=VzW41m4USGs&ab_channel=Jordanhasnolife
