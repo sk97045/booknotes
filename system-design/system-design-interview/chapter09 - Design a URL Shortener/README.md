@@ -127,9 +127,9 @@ Dump data somwhere and aggregate it later, multiple options
     * Log based message broker (Preferred): Write to write-ahead log, durable
 
 Processing of events in the log file
-    * HDFS + Spark: Very less frequencey and data will be out of date.
-    * Flink: real time stream processing, not required waster of resources
-    * Spark Streaming: Process events in a mini batch size
+  * HDFS + Spark: Very less frequencey and data will be out of date.
+  * Flink: real time stream processing, not required waster of resources
+  * Spark Streaming: Process events in a mini batch size
 
 Events processed exactly once. If the Streaming service fails while syncing with the database, use
   * 2 Phase Commit
