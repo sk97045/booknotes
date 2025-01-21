@@ -24,6 +24,14 @@ First step is to clarify what the interviewer has in mind exactly:
 There are two parts to the design:
  * Feed publishing - when user publishes a post, corresponding data is written to cache and DB. Post is populated to friends' news feed.
  * Newsfeed building - built by aggregating friends' posts in news feed.
+ * Users can comment on posts just like reddit in a nested way.
+
+## Back of the envelope calculations
+ * 100 char a post, ~100 Bytes and ~100 Bytes for metadata
+ * 1 Bln posts per day => 73 Tb per year
+ * On average user has 100 followers, some users have Mln followers
+ * Comments are 100 Bytes with metadata ~200 Bytes
+ * Most comments on one post = 1 Mln , 1 Mln * 200 Bytes => ~200 Mb
 
 ## Newsfeed API
 The Newsfeed API is the primary gateway for users to the news feed services.
@@ -31,6 +39,17 @@ The Newsfeed API is the primary gateway for users to the news feed services.
 Here's some of the main endpoints.
  * `POST /v1/me/feed` - publish a post. Payload includes `content` + `auth_token`.
  * `GET /v1/me/feed` - retrieve news feed. Payload includes `auth_token`.
+ * getFollowers(userId)
+ * getFollowing(userId)
+
+## Database
+Two pieces of information
+  * User-Follower ID 
+  * User-Following ID
+
+Both of these are important to answer getFollowers and getFollowing. But we can't store both and index both in separate Dbs
+as that would need us to implement Distributed transaction like 2PC. Better solution would be to use streaming approach
+where we use ChangeDataCapture(CDC) to update both the user-follower and user-following.
 
 ## Feed publishing
 ![feed-publishing](images/feed-publishign.png)
@@ -85,11 +104,26 @@ We'll adopt a hybrid approach - we'll pre-compute the news feed for people witho
 System diagram of fanout service:
 ![fanout-service](images/fanout-service.png)
  * Fetch friend IDs from graph database. They're suited for managing friend relationships and recommendations.
- * Get friends info from user cache. Filtering is applied here for eg muted/blocked friends.
+ * Get friends info from user cache (friends which this user in read path is following). Filtering is applied here for eg muted/blocked friends.
  * Send friends list and post ID to the message queue.
  * Fanout workers fetch the messages and store the news feed data in a cache. They store a `<post_id, user_id>` mappings** in it which can later be retrieved.
+    1. We can store the feed in the cache because that will make the read faster
+    2. Assume 100 followers per user, 1 Bln tweets/day * 200 bytes/tweet * 100 copies = 20 TB data per day
+    3. This is doable by big companies, 20 Tb / 256 Gb (cache host size) = 80 in-memory caches are needed, which is doable
 
 ** I think there is some kind of error in this part of the book. It doesn't make sense to store a `<post_id, user_id>` mapping in the cache. Instead, it should be a `<user_id, post_id>` mapping as that allows one to quickly fetch all posts for a given user, which are part of their news feed. In addition to that, the example in the book shows that you can store multiple user_ids or post_ids as keys in the cache, which is typically not supported in eg a hashmap, but it is actually supported when you use the `Redis Sets` feature, but that is not explicitly mentioned in the chapter.
+
+### Security levels on posts
+     
+| User | Follower | SecurityLevel |
+|---|---|---|
+| 1 | 2 | all |
+| 1 | 4 | close-friend |
+
+When there is any change in the User-Follower table above it will be notified to Notification-Web Workers via CDC, Web servers
+will also store information of Verified/Popular users so that during the retrieval path the posts for the followee-Ids which are
+popular can be fetched from local storage of Notification servers which will save time.
+
 
 ## News feed retrieval deep dive
 ![news-feed-retrieval-deep-dive](images/news-feed-retrieval-deep-dive.png)
@@ -110,6 +144,20 @@ Cache is very important for a news feed service. We divided it into 5 layers:
  * action - store info about whether a user liked, replied or took actions on a post.
  * counters - counters for replies, likes, followers, following, etc.
 
+
+## Extra
+
+### Nested Partition
+ * Recall 200 Mb of comment data per post, so shard by PostId
+ * Single leader replicaiton to avoid comments concurrency issue. 
+ * We can do DFS or BFS for comments traversal
+ * Store data in comments database table with DFS index
+
+
+![nested-comments-jordan](images/NestedComments.png)
+
+![news-feed-jordan](images/NewsFeedJordan.png)
+
 # Step 4 - wrap up
 In this chapter, we designed a news feed system and we covered two main use-cases - feed publishing and feed retrieval.
 
@@ -127,3 +175,7 @@ Other talking points:
  * multiple data center setup
  * Loose coupling components via message queues
  * Monitoring key metrics - QPS and latency.
+
+# Artifacts
+ * Byte Byte Go System Design
+ * Jordan has no life: https://www.youtube.com/watch?v=S2y9_XYOZsg&ab_channel=Jordanhasnolife
