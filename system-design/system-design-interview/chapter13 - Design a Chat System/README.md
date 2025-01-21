@@ -29,6 +29,13 @@ Summary of features we'll focus on:
  * Push notifications
  * Scale of 50mil DAU
 
+
+## Back of the envelope calculations
+ * 1 Bln total users
+ * Each user sends 100 msgs per day
+ * Each message is around 100 bytes
+ * 1 Bln * 100 msgs * 100 Bytes = 10 Tb per day ~4 Pb per year (Lot of data, need to do parititioning)
+
 # Step 2 - Propose high-level design and get buy-in
 Let's understand how clients and servers communicate first.
  * In this system, clients can be mobile devices or web browsers.
@@ -132,10 +139,19 @@ Selecting the correct storage system for this kind of data is crucial. Author re
  * they allow easy horizontal scaling
  * they provide low latency access to data
  * Relational databases don't handle long-tail (less-frequently accessed but large part of a distribution) of data well. When indexes grow large, random access is expensive.
- * Key-value stores are widely adopted for chat systems. Facebook and Discord both use key-value stores. Facebook uses HBase, Discord uses Cassandra.
+ * Key-value stores are widely adopted for chat systems. Facebook and Discord both use key-value stores. Facebook uses HBase, Discord uses Cassandra. 
+    1. HBase internally uses LSM Tree and single leader replication so it is faster for writes. 
+    2. Chat data is partitioned by chatID
 
 ## Data models
 Let's take a look at the data model for our messages.
+
+To know all the chats a user is involved in, this is partitioned on UserId
+UserId - ChatId
+U1 - C1
+U2 - C2
+U3 - C3
+
 
 Message table for one-on-one chat:
 ![one-on-one-chat-table](images/one-on-one-chat-table.png)
@@ -231,6 +247,8 @@ This is effective for small group chats. WeChat uses a similar approach and its 
 
 If we need to support larger groups, a possible mitigation is to fetch presence status only when a user enters a group or refreshes the members list.
 
+![whatsapp-chat-jordan](images/WhatsappChat.png)
+
 # Step 4 - Wrap up
 We managed to build a chat system which supports both one-on-one and group chats.
  * We used web sockets for real-time communication between clients and servers.
@@ -251,3 +269,6 @@ Additional talking points:
  * Chat server error - what happens if a chat server goes down. Zookeeper can facilitate a hand off to another chat server.
  * Message resend mechanism - retrying and queueing are common approaches for re-sending messages.
 
+# Artifacts
+ * Byte Byte Go System Design
+ * Jordan has no life: https://www.youtube.com/watch?v=S2y9_XYOZsg&ab_channel=Jordanhasnolife
