@@ -23,6 +23,11 @@ There are multiple flavors of a notification:
 # Step 2 - Propose high-level design and get buy-in
 This section explores the high-level design of the notification system.
 
+## Back of the envelope calculations
+ * Multiple users subscribed to a topic
+ * 1 BLN Topics, each getting 1000 Notifications of 100 Bytes per day 
+ * 100 Tb data per day => 30 Pb per year
+
 ## Different types of notifications
 How do the different notification types work at a high level?
 
@@ -91,7 +96,7 @@ Some changes from the original naive design:
  * Service 1 to N - services which send notifications within our system
  * Notification servers - provide APIs for sending notifications. Visible to internal services or verified clients. Do basic validation. Fetch notification templates from database. Put notification data in message queues for parallel processing.
  * Cache - user info, device info, notification templates
- * DB - stores data about users, notifications, settings, etc.
+ * DB - stores data about users, notifications, settings like - email/sms opt-in/opt-out, etc.
  * Message queues - Remove dependencies across components. They serve as buffers for notifications to be sent out. Each notification provider has a different message queue assigned to avoid outages in one third-party provider to affect the rest.
  * Workers - pull notification events from message queues and send them to corresponding third-party services.
  * Third-party services - already covered in initial design.
@@ -120,7 +125,7 @@ Example API call to send an email:
 
 Example lifecycle of a notification:
  * Service makes a call to make a notification
- * Notification service fetch metadata (user info, settings, etc) from database/cache 
+ * Notification service fetch metadata (user info, opt-in/opt-out settings, etc) from database/cache 
  * Notification event is sent to corresponding queue for processing for each third-party provider.
  * Workers pull notifications from the message queues and send them to third-party services.
  * Third-party services deliver nofications to end users.
@@ -189,6 +194,8 @@ Other features we've added:
  * Notification templates are added to provide a coherent notification experience.
  * Monitoring and tracking systems are added to keep track of system health for future improvements.
 
+![jordan-channel-jordan](images/notificaiton-service-jordan.png)
+
 # Step 4 - Wrap up
 We introduced a robust notification system which supports push notifications, sms and email. We introduced message queues to decouple system components.
 
@@ -198,3 +205,7 @@ We also dug deeper into some components and optimizations:
  * Tracking and monitoring - implemented to monitor important stats.
  * Respect user settings - Users can opt-out of receiving notifications. Service checks the user settings first, before sending notifications.
  * Rate limiting - Users would appreciate if we don't bombard them with a dozen of notifications all of a sudden.
+
+# Artifacts
+ * Byte Byte Go System Design
+ * Jordan has no life: https://www.youtube.com/watch?v=5V6Lam8GZo4&ab_channel=Jordanhasnolife
