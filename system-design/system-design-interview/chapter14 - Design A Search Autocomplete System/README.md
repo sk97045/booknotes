@@ -152,6 +152,8 @@ This doesn't work well as data is unevenly distributed due to eg the letter `a` 
 To mitigate this, we can have a dedicated shard mapper, which is responsible for devising a smart sharding algorithm, which factors in the uneven distribution of search terms:
 ![sharding](images/sharding.png)
 
+![jordan-search-design](images/jordan-search-design.png)
+
 # Step 4 - Wrap up
 Other talking points:
  * How to support multi-language - we store unicode characters in trie nodes, instead of ASCII.

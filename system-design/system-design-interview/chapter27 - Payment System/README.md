@@ -278,6 +278,8 @@ Here are some mechanisms we can use to ensure payment security:
  * PCI compliance - a security standard for organizations which handle branded credit cards
  * Fraud - address verification, card verification value (CVV), user behavior analysis, etc
 
+![payment-design-jordan](images/payment-design-jordan.png)
+
 # Step 4 - Wrap Up
 Other talking points:
  * Monitoring and alerting
@@ -286,3 +288,8 @@ Other talking points:
  * Geography - different regions might have different payment methods
  * Cash payment - very common in places like India and Brazil
  * Google/Apple Pay integration
+
+
+# Artifacts
+ * Byte Byte Go System Design
+ * Jordan has no life: https://www.youtube.com/watch?v=rT4sS4l51PY&ab_channel=Jordanhasnolife
