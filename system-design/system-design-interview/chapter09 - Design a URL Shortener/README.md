@@ -18,7 +18,7 @@ Other functional requirements - high availability, scalability, fault tolerance.
 # Back of the envelope calculation
  * 100 mil URLs per day -> ~1200 URLs per second.
  * Assuming read-to-write ratio of 10:1 -> 12000 reads per second.
- * Assuming URL shortener will run for 10 years, we need to support 365bil records.
+ * Assuming URL shortener will run for 10 years, we need to support 365 BLN records.
  * Average long URL length is 100 characters
  * Storage requirements for 10y - 36.5 TB
 
@@ -82,6 +82,12 @@ Comparison between the two approaches:
 | Collision is possible and needs to be resolved.                                               | Collision is not possible because ID is unique.                                                                                      |
 | It’s not possible to figure out the next available short URL because it doesn’t depend on ID. | It is easy to figure out what is the next available short URL if ID increments by 1 for a new entry. This can be a security concern. |
 
+## Optimization:
+
+In order to avoid the hash collisions, another approach is we can try to pre-populate the database with all the possible hash combinations. Assuming 2 Trillion Urls => 2 Trillion * 1 byte/char * 8 char = 16 TB which is not very much. 
+
+And then take a lock on the hash in the database, so at a time only one longURL will be able to get a hash, the second query by another longURL to the same hash is going to fail because of the lock qcquired by the first call. So, the second call is going to look for another hash, say X + 1.
+
 ## Scaling and Distributed nature:
   * Single(preferred)/Multi Leader: If it is multi leader there is a possibility that two clients can get the same hash key on different machines, so we will use single leader. Even if you use Redis for better performance still the same problem of hash collision
  exists.
@@ -90,8 +96,8 @@ Comparison between the two approaches:
       2. Two ways of reducing collision on same node:
         a. In case two users simultaneously try to get the same hash Key, database will do the locking and only one user will get the key, others will be locked out. 
         b. We can already populate the database with all the possible hash keys, and when each user tries to update the row they need to acquire a lock.
-  * Database underlying algorithm choice
-       1. In Memory LSM Tree: -Read(Slow) +Writes(fast)
+  * Database underlying algorithm choice: We prioritize reads over writes
+       1. In Memory LSM Tree: -Read(Slow) +Writes(fast), Also 36TB of data is not possible to put in-memory.
        2. B-Tree(Preferred): +Reads(fast) -Writes(Slow as it is in disk writing)
   * Cache: For faster queries and cache can be scaled too independently of DB.
        1. Write back: Can lead to inconsitencies
