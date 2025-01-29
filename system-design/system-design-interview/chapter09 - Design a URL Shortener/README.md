@@ -82,7 +82,7 @@ Comparison between the two approaches:
 | Collision is possible and needs to be resolved.                                               | Collision is not possible because ID is unique.                                                                                      |
 | It’s not possible to figure out the next available short URL because it doesn’t depend on ID. | It is easy to figure out what is the next available short URL if ID increments by 1 for a new entry. This can be a security concern. |
 
-## Optimization:
+## Optimization on hash collision:
 
 In order to avoid the hash collisions, another approach is we can try to pre-populate the database with all the possible hash combinations. Assuming 2 Trillion Urls => 2 Trillion * 1 byte/char * 8 char = 16 TB which is not very much. 
 

@@ -166,11 +166,10 @@ Disallow: /gp/aw/cr/
 We need to respect that file and avoid crawling the pages specified in there. We can cache it to avoid downloading it all the time.
 
 ## Content Hashing
-We can store the hash in some distributed Redis instance in order to not process the same content across different websites. But since different websites are
-processed by different nodes so the data needs to be the same in the Redis when seen by a node. This is done via CRDT an anti-entropy protocol
-to replicate the data conflict free in a distributed way.
- * Or we can store the hash content locally in the server disk and eventually if this server crawls a different website whose content is already processed
-   on a different server, then it should be fine as comapred to making the Redis-using CRDT which is complex.
+64 bit hash, 1 BLN sites, upto 8 GB to store these
+
+We can store the hash in some distributed Redis instance in order to not process the same content across different websites. But since different websites are processed by different nodes so the data needs to be the same in the Redis nodes that are distributed across the globe when seen by a particular node. This is done via CRDT an anti-entropy protocol to replicate the data conflict free in a distributed way.
+ * Or we can store the hash content locally in the server disk and eventually if this server crawls a different website whose content is already processed on a different server, then it should be fine as comapred to making the Redis-using CRDT which is complex.
  * processing same data is Idempotent.
 
 ### Performance optimization
@@ -216,4 +215,4 @@ Other relevant talking points:
 
 # Artifacts
  * Byte Byte Go System Design
- * Jordan has no life: https://www.youtube.com/watch?v=5V6Lam8GZo4&ab_channel=Jordanhasnolife
+ * Jordan has no life: https://www.youtube.com/watch?v=MdWvMX4J-Vc&ab_channel=Jordanhasnolife
