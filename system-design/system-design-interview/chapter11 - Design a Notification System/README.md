@@ -194,6 +194,10 @@ Other features we've added:
  * Notification templates are added to provide a coherent notification experience.
  * Monitoring and tracking systems are added to keep track of system health for future improvements.
 
+## Jordan video notes
+
+ * In order to do de-duplication on client we need: 16 bytes(UUID for idempotency key) * 65K Users (Number of ports per server) * 1000 notifications = 1 GB not too bad 
+
 ![jordan-channel-jordan](images/notificaiton-service-jordan.png)
 
 # Step 4 - Wrap up
