@@ -87,6 +87,12 @@ However, for larger routes, stitching together small, detailed routing tiles wou
 ![map-routing-hierarchical](images/map-routing-hierarchical.png)
 
 ## Back-of-the-envelope estimation
+
+At Zoom Level 21 there are approx 4.3 Trillion tiles. Each tile size is 256 * 256 pixel compressed PNG, image size of 100 KB. 
+4.4 Trillion * 100 KB = 440 Pb, 80-90% is ocean and inhabitable => ~50 PB space is needed for tiles then.
+
+Estimating at each previous level size drops by 4. So 50 + (50/4) + (50/16) ... = 67PB   ~100 PB for storing images at all levels.
+
 For storage, we need to store:
  * map of the world - estimated as ~70pb based on all the tiles we need to store, but factoring in compression of very similar tiles (eg vast desert)
  * metadata - negligible in size, so we can skip it from calculation

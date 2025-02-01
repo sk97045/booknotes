@@ -167,6 +167,12 @@ In an internalt node we store:
  * Top-left, bottom-right coordinates of quadrant dimensions
  * 4 pointers to children
 
+Data on leaf node: 32 Bytes (8 Bytes * 4 topLeft-bottmoRight) + 8 Bytes (ID) * 100 Businesses = 832 Bytes
+Data on internal node:  32 Bytes (8 Bytes * 4 topLeft-bottmoRight) + 32 Bytes ( 8 Bytes * 4 Cordinates)  = 64 Bytes
+No of Leaf Nodes = 200 Million / 100 = 2 Million
+No of Internal Nodes = 1/2 of No of leaf nodes = 0.67 Mln
+Total Memory of quad tree = 1.71 GB
+
 The total memory to represent the quadtree is calculated as ~1.7GB in the book if we assume that we operate with 200mil businesses.
 
 Hence, a quadtree can be stored in a single server, in-memory, although we can of course replicate it for redundancy and load balancing purposes.
@@ -203,7 +209,7 @@ Here's a quick summary of geohashes:
  * Easy to use and implement, no need to build a tree
  * supports returning businesses within a specified radius
  * Geohash precision is fixed. More complex logic is required if a more granular precision is needed
- * Updating the index is easy
+ * Updating the index is easy, to remove a business from index, we just need to remove it from the corresponding row with the same geohash and business_id.
 
 Here's a quick summary of quadtrees:
  * Slightly harder to implement as it requires us to build a tree
