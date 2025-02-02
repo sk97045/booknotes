@@ -29,6 +29,11 @@ Sample questions to understand the problem better:
  * Assuming 100mil daily active users and 200mil businesses
  * Search QPS == 100mil * 5 (average searches per day) / 10^5 (seconds in day) == 5000
 
+  ### For Doordash kind of Service
+  * Just in the US - 400 Mln people, 10 Mln active users, 1 order per day per user
+  * 10 Mln users, 500 bytes per user = 500 Mb = 5Gb
+  * 500,000 dashers
+
 # Step 2 - Propose High-Level Design and get Buy-In
 ## API Design
 We'll use a RESTful API convention to design a simplified version of the APIs.
@@ -287,3 +292,11 @@ Once businesses are filtered, the result set is going to be small, hence, it is 
 Summary of some of the more interesting topics we covered:
  * Discussed several indexing options - 2d search, evenly divided grid, geohash, quadtree, google S2
  * Discussed caching, replication, sharding, cross-DC deployments in the deep dive section
+
+# Other Designs
+![zomato-delivery-partner](images/ZomatoDeliveryPartner.png)
+
+# Artifacts
+ * Byte Byte Go System Design
+ * Gaurav Sen (Zomato) : https://www.youtube.com/watch?v=nHh3DnjnPig&ab_channel=GauravSen
+ * Jordan (Doordash): https://www.youtube.com/watch?v=iRhSAR3ldTw&ab_channel=GauravSen
