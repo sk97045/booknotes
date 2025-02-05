@@ -426,3 +426,9 @@ Additional talking points:
  * Protocol of communication. Important considerations - support all use-cases and high data volume, as well as verify message integrity. Popular protocols - AMQP and Kafka protocol.
  * Retry consumption - if we can't process a message immediately, we could send it to a dedicated retry topic to be attempted later.
  * Historical data archive - old messages can be backed up in high-capacity storages such as HDFS or object storage (eg S3).
+
+
+## Artifacts:
+  * Byte Byte Go System Design
+  * Hello Interview: https://www.youtube.com/watch?v=DU8o-OTeoCc&ab_channel=HelloInterview-SWEInterviewPreparation
+  * Jordan has no life: https://www.youtube.com/watch?v=e2iK8pUP9Vs&t=7s&ab_channel=Jordanhasnolife
