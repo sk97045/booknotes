@@ -32,7 +32,7 @@ Here's a set of potential questions between Candidate and Interviewer:
  * C: What data delivery semantic do we want to support? At-most-once, at-least-once, exactly-once?
  * I: We definitely want to support at-least-once. Ideally, we can support all and make them configurable.
  * C: What's the target throughput for end-to-end latency?
- * I: It should support high throughput for use cases like log aggregation and low throughput for more traditional use cases.
+ * I: It should support high throughput for use cases like log aggregation and low latency for more traditional use cases.
 
 Functional requirements:
  * Producers send messages to a message queue
@@ -103,7 +103,7 @@ Consumer groups are a set of consumers working together to consume messages from
 # Step 3 - Design Deep Dive
 In order to achieve high throughput and preserve the high data retention requirement, we made some important design choices:
  * We chose an on-disk data structure which takes advantage of the properties of modern HDD and disk caching strategies of modern OS-es.
- * The message data structure is immutable to avoid extra copying, which we want to avoid in a high volume/high traffic system.
+ * The message data structure is immutable that is it we are passing it from producers to consumers without any modification to avoid extra copying, which we want to avoid in a high volume/high traffic system.
  * We designed our writes around batching as small I/O is an enemy of high throughput.
 
 ## Data storage
@@ -202,7 +202,7 @@ One important consideration when designing the consumer is whether to use a push
    * If rate of consumption is slow, consumer will not be overwhelmed and we can scale it to catch up.
    * The pull model is more suitable for batch processing, because with the push model, the broker can't know how many messages a consumer can handle. 
    * With the pull model, on the other hand, consumers can aggressively fetch large message batches.
-   * The down side is the higher latency and extra network calls when there are no new messages. Latter issue can be mitigated using long polling.
+   * The down side is the higher latency and extra network calls when there are no new messages. Latter issue can be mitigated using long polling (as it allows pulls to wait a specified amount of time for new messages)
 
 Hence, most message queues (and us) choose the pull model.
 ![consumer-flow](images/consumer-flow.png)
@@ -321,7 +321,7 @@ On the consumer side, we can connect all consumers to the leader for a partition
  * Messages in a partition are sent to only one consumer in a group, which limits the connections to the leader replica
  * The number of connections to leader replica is typically not high as long as the topic is not super hot
  * We can scale a hot topic by increasing the number of partitions and consumers
- * In certain scenarios, it might make sense to let a consumer lead from an ISR, eg if they're located in a separate DC
+ * In certain scenarios, it might make sense to let a consumer read from an ISR, eg if they're located in a separate DC
 
 The ISR list is maintained by the leader who tracks the lag between itself and each replica.
 
@@ -336,7 +336,7 @@ Consumer groups are isolated from each other. It is easy to add/remove consumer 
 
 Rebalancing help handle the case when consumers are added/removed from a group gracefully.
 
-Consumer groups are rebalancing help us achieve scalability and fault tolerance.
+Consumer groups are rebalancing, so that help us achieve scalability and fault tolerance.
 
 ### Broker
 How do brokers handle failure?
