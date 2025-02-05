@@ -416,6 +416,11 @@ This can be achieved by sending messages to temporary storage in the broker and 
  * The temporary storage can be one or more special message topics
  * The timing function can be achieved using dedicated delay queues or a [hierarchical time wheel](http://www.cs.columbia.edu/~nahum/w6998/papers/sosp87-timing-wheels.pdf)
 
+## Other Designs
+
+### By Jordan
+![JordanDistritbuedMessageQueue](images/DistributedMessageQueueJordan.png)
+
 # Step 4 - Wrap up
 Additional talking points:
  * Protocol of communication. Important considerations - support all use-cases and high data volume, as well as verify message integrity. Popular protocols - AMQP and Kafka protocol.
