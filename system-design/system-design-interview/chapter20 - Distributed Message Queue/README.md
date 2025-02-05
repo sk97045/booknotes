@@ -419,7 +419,7 @@ This can be achieved by sending messages to temporary storage in the broker and 
 ## Other Designs
 
 ### By Jordan
-![JordanDistritbuedMessageQueue](images/DistributedMessageQueueJordan.png)
+![JordanDistritbuedMessageQueue](images/DistributeMessageQueueJordan.png)
 
 # Step 4 - Wrap up
 Additional talking points:
