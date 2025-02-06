@@ -97,7 +97,7 @@ A good way to visualize how data looks like:
  * The x axis is the time
  * the y axis is the dimension you're querying - eg metric name, tag, etc.
 
-The data access pattern is write-heavy and spiky reads as we collect a lot of metrics, but they are infrequently accessed, although in bursts when eg there are ongoing incidents.
+The data access pattern is **write-heavy** and spiky reads as we collect a lot of metrics, but they are infrequently accessed, although in bursts when eg there are ongoing incidents.
 
 The data storage system is the heart of this design. 
  * It is not recommended to use a general-purpose database for this problem, although you could achieve good scale \w expert-level tuning.
