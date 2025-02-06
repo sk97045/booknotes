@@ -55,6 +55,11 @@ We'll start from:
 Example storage we could use:
 ![storage-example](images/storage-example.png)
 
+## Core Entitites
+ * File (raw bytes)
+ * File Metadata
+ * Users
+
 ## APIs
 **Upload file:**
 ```
@@ -86,6 +91,11 @@ params:
  * maximum number of revisions to return
 
 All the APIs require authentication and use HTTPS.
+
+**Get Changes**
+```
+https://api.example.com/files/changes?since={timestamp}  -> return fields[]
+```
 
 ## Move away from single server
 As more files are uploaded, at some point, you reach your storage's capacity.
@@ -253,3 +263,9 @@ This is faster than our approach but has drawbacks:
 
 Another interesting discussion is moving online/offline logic to separate service so that other services can reuse it to implement interesting functionality.
 
+# Other Designs
+  ![helloInterviewDesign](images/hello-interview.png)
+
+# Artifacts
+ * Byte Byte Go System Design
+ * Hello Interview: https://www.youtube.com/watch?v=_UZ1ngy-kOI&t=2s&ab_channel=HelloInterview-SWEInterviewPreparation
