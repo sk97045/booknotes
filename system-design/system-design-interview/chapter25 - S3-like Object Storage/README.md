@@ -278,7 +278,7 @@ But we still need to scale the server for read throughput.
 
 The object table will probably not fit into a single database server, though. Hence, we can scale the table via sharding:
  * Sharding by bucket_id will lead to hotspot issues as a bucket can have billions of objects
- * Sharding by bucket_id makes the load more evenly distributed, but our queries will be slow
+ * Sharding by object_id makes the load more evenly distributed, but our queries will be slow
  * We choose sharding by `hash(bucket_name, object_name)` since most queries are based on the object/bucket name.
 
 Even with this sharding scheme, though, listing objects in a bucket will be slow.
