@@ -265,6 +265,7 @@ Another interesting discussion is moving online/offline logic to separate servic
 
 # Other Designs
   ![helloInterviewDesign](images/hello-interview.png)
+  ![jordanDesign](images/jordan-design.png)
 
 # Artifacts
  * Byte Byte Go System Design
