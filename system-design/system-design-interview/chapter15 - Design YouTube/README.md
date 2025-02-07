@@ -262,3 +262,10 @@ Additional talking points:
    * Lower requirement for parallelism as small chunks of data are already processed in real time
    * different error handling, as there is a timeout after which we need to stop retrying
    * Video takedowns - videos that violate copyrights, pornography, any other illegal acts need to be removed either during upload flow or based on user flagging.
+
+# Other Designs
+![ExponentPrimeSystemDesign](images/ExponentPrimeSystemDesignn.png)
+
+# Artifacts
+ * Alex Xu
+ * Exponent System Desing: https://www.youtube.com/watch?v=PuU_0esYyhg&ab_channel=Exponent
