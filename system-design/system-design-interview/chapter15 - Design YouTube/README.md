@@ -264,7 +264,7 @@ Additional talking points:
    * Video takedowns - videos that violate copyrights, pornography, any other illegal acts need to be removed either during upload flow or based on user flagging.
 
 # Other Designs
-![ExponentPrimeSystemDesign](images/ExponentPrimeSystemDesignn.png)
+![ExponentPrimeSystemDesign](images/ExponentPrimeSystemDesign.png)
 
 # Artifacts
  * Alex Xu
