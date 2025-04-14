@@ -265,9 +265,7 @@ Additional talking points:
 
 # Other Designs
 ![ExponentPrimeSystemDesign](images/ExponentPrimeSystemDesign.png)
-![HelloDesignTwitter](images/hello-design-twitter.png)
 
 # Artifacts
  * Alex Xu
  * Exponent System Desing: https://www.youtube.com/watch?v=PuU_0esYyhg&ab_channel=Exponent
- * Hello Design Twitter: https://www.youtube.com/watch?v=Nfa-uUHuFHg&ab_channel=HelloInterview-SWEInterviewPreparation

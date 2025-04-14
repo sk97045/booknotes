@@ -176,6 +176,10 @@ Other talking points:
  * Loose coupling components via message queues
  * Monitoring key metrics - QPS and latency.
 
+# Other Designs
+![HelloDesignTwitter](images/hello-design-twitter.png)
+
 # Artifacts
  * Byte Byte Go System Design
  * Jordan has no life: https://www.youtube.com/watch?v=S2y9_XYOZsg&ab_channel=Jordanhasnolife
+ * Hello Design Twitter: https://www.youtube.com/watch?v=Nfa-uUHuFHg&ab_channel=HelloInterview-SWEInterviewPreparation
