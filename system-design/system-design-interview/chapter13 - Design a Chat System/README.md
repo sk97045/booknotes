@@ -269,6 +269,10 @@ Additional talking points:
  * Chat server error - what happens if a chat server goes down. Zookeeper can facilitate a hand off to another chat server.
  * Message resend mechanism - retrying and queueing are common approaches for re-sending messages.
 
+# Other Designs
+![hello-interview](images/HelloInterviewWhatsapp.png)
+
 # Artifacts
  * Byte Byte Go System Design
  * Jordan has no life: https://www.youtube.com/watch?v=S2y9_XYOZsg&ab_channel=Jordanhasnolife
+ * HelloInterview: https://www.youtube.com/watch?v=cr6p0n0N-VA&ab_channel=HelloInterview-SWEInterviewPreparation
