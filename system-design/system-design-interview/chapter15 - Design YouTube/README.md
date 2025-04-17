@@ -265,7 +265,9 @@ Additional talking points:
 
 # Other Designs
 ![ExponentPrimeSystemDesign](images/ExponentPrimeSystemDesign.png)
+![IGotAnOffer](images/IGotAnOffer.png)
 
 # Artifacts
  * Alex Xu
  * Exponent System Desing: https://www.youtube.com/watch?v=PuU_0esYyhg&ab_channel=Exponent
+ * I Got An Offer: https://www.youtube.com/watch?v=NHqdG-aZxOk&ab_channel=IGotAnOffer%3AEngineering
