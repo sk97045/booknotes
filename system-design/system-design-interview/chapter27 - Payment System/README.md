@@ -289,6 +289,7 @@ Other talking points:
  * Cash payment - very common in places like India and Brazil
  * Google/Apple Pay integration
 
+![hello-interview-payment](images/hello-interview-payment.png)
 
 # Artifacts
  * Byte Byte Go System Design
