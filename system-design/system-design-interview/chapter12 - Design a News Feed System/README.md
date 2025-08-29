@@ -32,6 +32,23 @@ There are two parts to the design:
  * On average user has 100 followers, some users have Mln followers
  * Comments are 100 Bytes with metadata ~200 Bytes
  * Most comments on one post = 1 Mln , 1 Mln * 200 Bytes => ~200 Mb
+ 
+### Instagram Image Feed With Likes|Comments
+ * Handle at least 1 Mln Concurrent like/comments
+ * Handle at least 1 Bln registered users   
+ * Support JPEG< PNG< GIF. Max size = 5 MB
+ * 100 K Concurrent Uploads supported
+ * Upload 10 images/day, 500 images/month, 
+    * Average Image size: 5 MB
+    * Each User uploads 10 images/day
+    * Max storage capacity with 1 Bln Users for month = 10^9 * 10 *  5 * 10^6 * 30
+                                                      = 1.5 ExaByte
+    * 10% of Max uploads per month => 150 PB of images per month
+ * Compute Resources
+    * Concurrent uploads: 100,000
+    * Processing cores: 100,000
+    * 1 server = 32 Cores
+    * Total servers required = 3125
 
 ## Newsfeed API
 The Newsfeed API is the primary gateway for users to the news feed services.
