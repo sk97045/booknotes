@@ -427,6 +427,7 @@ Aggregation is typically done in OLAP databases such as ClickHouse or Druid.
 ![alternative-design](images/alternative-design.png)
 
 ## Other designs
+![hello-interview-1](images/hello-interview-design-1.png)
 ![hello-interview](images/hello-interview-design.png)
 
 # Step 4 - Wrap up
