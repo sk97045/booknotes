@@ -336,3 +336,10 @@ A high-quality visualization system is very hard to build. It is hard to justify
 # Step 4 - Wrap up
 Here's our final design:
 ![final-design](images/final-design.png)
+
+# Step 5 - Other Designs
+
+![1](images/hi_1.png)
+![2](images/hi_2.png)
+![3](images/hi_3.png)
+![4](images/hi_4.png)
