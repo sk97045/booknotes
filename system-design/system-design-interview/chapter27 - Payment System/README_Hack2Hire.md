@@ -1,10 +1,5 @@
 # Design a Payment Processor (Card-Present Acquiring)
 
-> **System Design in a Hurry walkthrough** — Requirements → Core Entities → API/Interface → Data Flow → High-Level Design → Deep Dives.
-> A payment processor sits between **merchants** and **downstream card networks** (Visa, Mastercard, Amex). It receives swipe/tap transactions, forwards them for real-time authorization, and settles actual funds in a **nightly batch**. The hard part: bridging fast synchronous authorization with slow deferred settlement **without losing track of which charges actually settled**.
-
----
-
 ## 1. Requirements (~5 min)
 
 ### Clarifying questions I'd ask first
@@ -32,8 +27,6 @@
 - **Scale**: **10M hold/charge requests/day** from tens of thousands of merchants.
 - **Idempotency**: merchant retries and network failures never create duplicate authorizations or double settlements.
 - **Reconciliation**: detect and surface mismatches between authorized, charged, and downstream-settled amounts.
-
-> **Consistency model**: payments → **strong consistency** (ACID lifecycle, conditional state transitions). *DDIA Ch. 7 (Transactions).*
 
 ### Back-of-the-envelope (only where it changes a decision)
 
@@ -118,7 +111,7 @@ erDiagram
 
 ### Storage choices
 
-- **PostgreSQL** — ACID lifecycle correctness, cross-table joins, conditional state-machine updates. *DDIA Ch. 7.*
+- **PostgreSQL** — ACID lifecycle correctness, cross-table joins, conditional state-machine updates.
 - **S3** — **immutable, versioned batch files** for audit and safe retransmission.
 - **Redis** — rebuildable **cache** of hold status on the charge hot path (sub-ms lookups); PostgreSQL is the fallback authority. **Never source of truth.**
 
