@@ -68,7 +68,7 @@ Every functional requirement maps to a durable boundary or an ephemeral helper. 
 The authoritative boundary is intentionally small. After any crash, the `jobs` row and its `status` column are the legal truth. Redis state is rebuildable from heartbeats. Leases that outlive their expiry are garbage-collected and their jobs return to pending. Recovery never depends on ephemeral state being correct - only on PostgreSQL being available.
 
 
-![data-tables](images/Data_tables.png)
+![data-tables](images/hack2hire/Data_tables.png)
 
 ## Core tables
  * **`jobs`** - the lifecycle anchor. Stores resource requirements (`gpu_count`, `memory_mb`), a `status` enum enforcing legal transitions (pending → leased → running → succeeded / failed / preempting → cancelled), and a `version` column for optimistic concurrency. Both scheduler and node agent write here, so the version counter prevents stale updates overwriting fresher state.
@@ -162,6 +162,9 @@ The naive move: a single scheduler polls the queue, finds a node with free GPUs,
 ## Core architecture
 The baseline: a **Scheduler**, a single **PostgreSQL** database, and remote **GPU Node Agents**. To execute a job, the scheduler reads pending tasks and node capacities, selects a node, writes an ephemeral lease record binding the job to that node, then sends an `AssignJob` gRPC request. Once the node agent pulls the image and boots it with GPU isolation, it confirms the lease and the job goes to running. On completion, the agent reports back and the scheduler deletes the lease to release capacity.
 
+
+![data-tables](images/hack2hire/day_0_design.png)
+
 That single path works in a quiet cluster, but three gaps appear:
  * **No priority-aware preemption** - a low-priority job holding GPUs blocks high-priority work indefinitely; the scheduler has no mechanism to reclaim resources.
  * **No heartbeat-based lease recovery** - a node crashing mid-job leaves a live lease and a ghost reservation. The scheduler can't distinguish a slow job from a dead node until the lease expires, which may be far too long.
@@ -170,6 +173,9 @@ That single path works in a quiet cluster, but three gaps appear:
 These map to three properties the full architecture must provide: a **preemption protocol** that interrupts running work on a priority boundary, a **heartbeat stream** from every node agent for second-scale failure detection, and a **capacity model** that tracks memory and topology alongside raw GPU count.
 
 ## Architecture overview
+
+![data-tables](images/hack2hire/architecture.png)
+
 The **Job API** accepts submissions over REST, validates, writes the job row to PostgreSQL, and enqueues it in the **Redis priority queue** (sorted set scored by priority). The **Scheduler** runs a tight loop: every second it dequeues the highest-priority job, checks the capacity cache for a node with enough free GPUs, and creates a **scheduling lease** in PostgreSQL binding the job to that node. The lease has a short expiry (60s).
 
 The **Node Agent** receives the lease over gRPC, pulls the container image, starts it with GPU isolation, and confirms the lease. Once confirmed, the job goes to running. The agent streams heartbeats every 10s. Output artifacts are written directly to **S3** by the container.
@@ -177,9 +183,15 @@ The **Node Agent** receives the lease over gRPC, pulls the container image, star
 PostgreSQL is authoritative (`jobs`, `job_events`, `nodes`, `scheduling_leases`). Redis is the scheduling hot-path cache (priority sorted set + per-node capacity hash), both rebuildable. Scheduling is really **bin-packing under churn** - multi-GPU jobs fragment capacity, and the Redis view can hide fragmentation. The scheduler uses a **leader-elected single instance** (PostgreSQL advisory lock) so exactly one process owns the loop, with a standby that takes over on failure.
 
 ## Job lifecycle state machine
+
+![data-tables](images/hack2hire/state_lifecycle.png)
+
 A job starts **pending** on submission. The scheduler moves it to **leased** when it creates a lease. The node agent moves it to **running** after confirming. From running it ends as **succeeded** or **failed**, or the scheduler moves it to **preempting** when a higher-priority job needs the resources. From preempting it returns to **pending** after graceful shutdown is confirmed. A user can **cancel** from pending, leased, or running. Every transition is gated by a version check on the job row, so two racing actors cannot both succeed.
 
 ## Flow 1: Submit, schedule, and execute
+
+![data-tables](images/hack2hire/schedule_flow.png)
+
 The user calls `POST /v1/jobs`. The Job API writes a pending row and enqueues the job in Redis with priority as the score.
 
 On the next tick, the scheduler pops the highest-priority job, checks the capacity cache for a fitting node, and opens a PostgreSQL transaction: insert a `scheduling_leases` row, update the job to leased (version increment), decrement the node's available GPUs. This atomic transaction is the **propose** step.
@@ -187,6 +199,9 @@ On the next tick, the scheduler pops the highest-priority job, checks the capaci
 The scheduler then sends `AssignJob`. The node agent pulls the image, starts the container with GPU passthrough, and confirms - the job moves to running. If the agent rejects (resource mismatch, image pull failure), the scheduler rolls back: lease cancelled, job back to pending, capacity released. If the lease expires with no response, the background sweeper performs the same rollback.
 
 ## Flow 2: Preempt, checkpoint, and re-queue
+
+![data-tables](images/hack2hire/preempt_flow.png)
+
 When a critical job arrives and no node has free GPUs, the scheduler scans running jobs for a victim: a strictly-lower-priority job on a node with enough GPUs. It prefers the lowest-priority job that frees the required resources.
 
 The scheduler transitions the victim to preempting and sends a graceful termination signal; the agent gives the container a grace period (30s) to save a checkpoint to S3 before stopping. On confirmation, the scheduler releases the allocation, returns the victim to pending (with a `preempted` event), and re-enqueues it. The freed resources go to the high-priority job via the normal lease flow.
@@ -213,7 +228,42 @@ For the third case, the scheduler does not decide immediately whether the node i
 
 The version column prevents races. If the agent is slow, the lease expires, the sweeper rolls the job back to pending, and a late confirmation arrives - the compare-and-swap on version fails. The agent detects the stale lease, stops the container, and no inconsistency leaks through.
 
+```
+BEGIN;
+
+-- 1. Verify the lease exists and is still pending confirmation
+--    We use FOR UPDATE SKIP LOCKED to avoid contention with other schedulers/sweepers
+SELECT id, job_id, expires_at 
+FROM scheduling_leases 
+WHERE id = :lease_id 
+  AND status = 'pending_confirmation'
+FOR UPDATE SKIP LOCKED;
+
+-- If no row found or expired, abort (stale confirmation)
+
+-- 2. Update the Job Status to 'running'
+--    Optimistic locking ensures we don't overwrite if the job was already preempted/failed
+UPDATE jobs 
+SET status = 'running', 
+    version = version + 1, -- Increment version for concurrency control
+    node_id = :node_id,
+    started_at = NOW()
+WHERE job_id = :job_id 
+  AND version = :expected_version; -- Must match the version when lease was created
+
+-- 3. Mark the Lease as Confirmed
+UPDATE scheduling_leases 
+SET status = 'confirmed',
+    confirmed_at = NOW()
+WHERE id = :lease_id;
+
+COMMIT;
+```
+
 ## Fault detection and job recovery
+
+![data-tables](images/hack2hire/failure_recovery_flow.png)
+
 GPU training jobs run for hours. Losing a job to a node crash is expensive; killing a healthy job over a transient blip is just as bad. Fault detection balances speed against false positives.
 
 Agents send heartbeats every 10s over the gRPC stream, each including container inventory and resource usage. The scheduler keeps `last_heartbeat_at` per node in Redis and the `nodes` table.

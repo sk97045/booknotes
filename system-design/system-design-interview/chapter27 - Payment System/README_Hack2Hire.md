@@ -311,7 +311,7 @@ The naive version is "query pending, write file, send." The hard parts:
 ### Deep Dive 3 — Reconciliation: closing the trust gap
 
 
-![data-tables](images/hack2hire/1.png)
+![data-tables](images/hack2hire/2.png)
 
 Without reconciliation we hold two record sets — ours and downstream's — with no systematic proof they agree. The service loads all `batch_items`, compares against the downstream response, and classifies:
 
