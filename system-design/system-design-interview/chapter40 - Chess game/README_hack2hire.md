@@ -237,14 +237,6 @@ That split is the whole design: **the UI can feel realtime because authoritative
 - **Discord's** gateway (Bytebytego case study) shows the same shape at fanout scale: a stateful session owns the source of truth and pushes updates *after* commit, while the realtime layer is a fast mirror — never the ledger. The chess "fanout after the boundary" rule is the same principle.
 - **Bytebytego realtime patterns** consistently separate the *commit path* (correctness, durable, serialized) from the *delivery path* (best-effort, low-latency) — the through-line of this entire design.
 
-## DDIA anchors
-
-- **Ch. 5 (Replication)** — single-leader-per-game is the cleanest model for the "exactly one next ply" invariant; failover reconstructs from the replicated log, not client memory.
-- **Ch. 7 (Transactions)** — the conditional append is a compare-and-set on `next_ply_index`; acknowledging only after the durable append is the isolation/atomicity guarantee that prevents forked games.
-- **Ch. 8 (Trouble with Distributed Systems)** — *why we never trust client clocks*: unreliable clocks and network delay are precisely why the server uses a **monotonic** clock and derives time from committed boundaries. Split-brain during failover is the "two owners extend the same budget" hazard.
-- **Ch. 11 (Stream Processing)** — the move log is an append-only event log; rating updates are a downstream consumer of durable terminal events (decoupled, async).
-- **Ch. 12 (End-to-End Argument)** — correctness lives at the authoritative session owner + durable log; realtime fanout is an optimization layered on top, and `GET /games/{id}` is the end-to-end repair path.
-
 ---
 
 ## 🔍 Senior-Signal Questions to Ask in Your Interview
