@@ -106,7 +106,7 @@ Solution:
 Functional determinism is guaranteed via the sequencer technique we used.
 
 The actual time when the event happens doesn't matter:
-![JordanJobScheduler](images/JordanJobScheduler.png)
+![JordanJobScheduler](images/jordan/JordanJobScheduler.png)
 
 ## Artifacts
 
