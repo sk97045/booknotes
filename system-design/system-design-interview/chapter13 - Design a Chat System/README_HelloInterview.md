@@ -21,10 +21,11 @@
 
 ## High-Level Design (~10–15 min)
 
+### Arpit 
 ![data-tables](images/arpit/1.png)
 ![data-tables](images/arpit/2.png)
 
-
+### ShowOffer
 ![data-tables](images/show-offer/1.png)
 ![data-tables](images/show-offer/2.png)
 ![data-tables](images/show-offer/3.png)

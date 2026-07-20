@@ -45,7 +45,7 @@ Why?
  * Building scalable blob storage over CDN is complex and costly. Even big tech don't build everything from scratch. Netflix uses AWS and Facebook uses Akamai's CDN.
 
 Here's our system design at a high-level:
-![high-level-sys-design](images/high-level-sys-design.png)
+![high-level-sys-design](images/alex-xu/high-level-sys-design.png)
  * Client - you can watch youtube on web, mobile and TV.
  * CDN - videos are stored in CDN.
  * API Servers - Everything else, except video streaming goes through the API servers. Feed recommendation, generating video URL, updating metadata db and cache, user signup.
@@ -53,7 +53,7 @@ Here's our system design at a high-level:
 Let's explore high-level design of video streaming and uploading.
 
 ## Video uploading flow
-![video-uploading-flow](images/video-uploading-flow.png)
+![video-uploading-flow](images/alex-xu/video-uploading-flow.png)
  * Users watch videos on a supported client
  * Load balancer evenly distributes requests across API servers
  * All user requests go through API servers, except video streaming
@@ -69,7 +69,7 @@ Let's explore high-level design of video streaming and uploading.
 Let's now explore the flow of uploading videos and video metadata. Metadata includes info about video URL, size, resolution, format, etc.
 
 Here's how the video uploading flow works:
-![video-uploading-flow](images/video-uploading-flow.png)
+![video-uploading-flow](images/alex-xu/video-uploading-flow.png)
  * Videos are uploaded to original storage
  * Transcoding servers fetch videos from storage and start transcoding
  * Once transcoding is complete, two steps are executed in parallel:
@@ -78,12 +78,12 @@ Here's how the video uploading flow works:
  * API servers inform user that uploading is complete
 
 Here's how the metadata update flow works:
-![metadata-update-flow](images/metadata-update-flow.png)
+![metadata-update-flow](images/alex-xu/metadata-update-flow.png)
  * While file is being uploaded, user sends a request to update the video metadata - file name, size, format, etc.
  * API servers update metadata database & cache
 
 ## Video streaming flow
-![video-streaming-flow](images/video-streaming-flow.png)
+![video-streaming-flow](images/alex-xu/video-streaming-flow.png)
 
 Whenever users watch videos on YouTube, they don't download the whole video at once. Instead, they download a little and start watching it while downloading the rest.
 This is referred to as streaming. Stream is served from closest CDN server for lowest latency.
@@ -117,20 +117,20 @@ Transcoding video is computationally expensive and time-consuming.
 In addition to that, different creators have different inputs - some provide thumbnails, others do not, some upload HD, others don't.
 
 In order to support video processing pipelines, dev customisations, high parallelism, we adopt a DAG model:
-![dag-model](images/dag-model.png)
+![dag-model](images/alex-xu/dag-model.png)
 
 Some of the tasks applied on a video file:
  * Ensure video has good quality and is not malformed
  * Video is encoded to support different resolutions, codecs, bitrates, etc.
  * Thumbnail is automatically added if a user doesn't specify it.
  * Watermark - image overlay on video if specified by creator
-![video-encodings](images/video-encodings.png)
+![video-encodings](images/alex-xu/video-encodings.png)
 
 ## Video transcoding architecture
-![video-transcoding-architecture](images/video-transcoding-architecture.png)
+![video-transcoding-architecture](images/alex-xu/video-transcoding-architecture.png)
 
 ### Preprocessor
-![preprocessor](images/preprocessor.png)
+![preprocessor](images/alex-xu/preprocessor.png)
 
 The preprocessor's responsibilities:
  * Video splitting - video is split in group of pictures (GOP) alignment, ie arranged groups of chunks which can be played independently
@@ -138,21 +138,21 @@ The preprocessor's responsibilities:
  * DAG generation - DAG is generated based on config files specified by programmers.
 
 Example DAG configuration with two steps:
-![dag-config-example](images/dag-config-example.png)
+![dag-config-example](images/alex-xu/dag-config-example.png)
 
 ### DAG Scheduler
-![dag-scheduler](images/dag-scheduler.png)
+![dag-scheduler](images/alex-xu/dag-scheduler.png)
 
 DAG scheduler splits a DAG into stages of tasks and puts them in a task queue, managed by a resource manager:
-![dag-split-example](images/dag-split-example.png)
+![dag-split-example](images/alex-xu/dag-split-example.png)
 
 In this example, a video is split into video, audio and metadata stages which are processed in parallel.
 
 ### Resource manager
-![resource-manager](images/resource-manager.png)
+![resource-manager](images/alex-xu/resource-manager.png)
 
 Resource manager is responsible for optimizing resource allocation.
-![resource-manager-deep-dive](images/resource-manager-deep-dive.png)
+![resource-manager-deep-dive](images/alex-xu/resource-manager-deep-dive.png)
  * Task queue is a priority queue of tasks to be executed
  * Worker queue is a queue of available workers and worker utilization info
  * Running queue contains info about currently running tasks and which workers they're assigned to
@@ -165,20 +165,20 @@ How it works:
  * task scheduler removes the job from the running queue once the job is done
 
 ### Task workers
-![task-workers](images/task-workers.png)
+![task-workers](images/alex-xu/task-workers.png)
 
 The workers execute the tasks in the DAG. Different workers are responsible for different tasks and can be scaled independently.
-![task-workers-example](images/task-workers-example.png)
+![task-workers-example](images/alex-xu/task-workers-example.png)
 
 ### Temporary storage
-![temporary-storage](images/temporary-storage.png)
+![temporary-storage](images/alex-xu/temporary-storage.png)
 
-Multiple storage systems are used for different types of data. Eg temporary images/video/audio is put in blob storage. Metadata is put in an in-memory cache as data size is small.
+Multiple storage systems are used for different types of data. Eg temporary images/alex-xu/video/audio is put in blob storage. Metadata is put in an in-memory cache as data size is small.
 
 Data is freed up once processing is complete.
 
 ### Encoded video
-![encoded-video](images/encoded-video.png)
+![encoded-video](images/alex-xu/encoded-video.png)
 
 Final output of the DAG. Example output - `funny_720p.mp4`.
 
@@ -187,12 +187,12 @@ Now it's time to introduce some optimizations for speed, safety, cost-saving.
 
 ### Speed optimization - parallelize video uploading
 We can split video uploading into separate units via GOP alignment:
-![video-uploading-optimization](images/video-uploading-optimization.png)
+![video-uploading-optimization](images/alex-xu/video-uploading-optimization.png)
 
 This enables fast resumable uploads if something goes wrong. Splitting the video file is done by the client.
 
 ### Speed optimization - place upload centers close to users
-![upload-centers](images/upload-centers.png)
+![upload-centers](images/alex-xu/upload-centers.png)
 
 This can be achieved by leveraging CDNs.
 
@@ -200,14 +200,14 @@ This can be achieved by leveraging CDNs.
 We can build a loosely coupled system and enable high parallelism.
 
 Currently, components rely on inputs from previous components in order to produce outputs:
-![no-parralelism-components](images/no-parralelism-components.png)
+![no-parralelism-components](images/alex-xu/no-parralelism-components.png)
 
 We can introduce message queues so that components can start doing their task independently of previous one once events are available:
-![parralelism-components](images/parralelism-components.png)
+![parralelism-components](images/alex-xu/parralelism-components.png)
 
 ### Safety optimization - pre-signed upload URL
 To avoid unauthorized users from uploading videos, we introduce pre-signed upload URLs:
-![presigned-upload-url](images/presigned-upload-url.png)
+![presigned-upload-url](images/alex-xu/presigned-upload-url.png)
 
 How it works:
  * client makes request to API server to fetch upload URL
@@ -226,7 +226,7 @@ CDN is expensive, as we've seen in our back of the envelope estimation.
 We can piggyback on the fact that video streams follow a long-tail distribution - ie a few popular videos are accessed frequently, but everything else is not.
 
 Hence, we can store popular videos in CDN and serve everything else from high capacity storage servers:
-![cdn-optimization](images/cdn-optimization.png)
+![cdn-optimization](images/alex-xu/cdn-optimization.png)
 
 Other cost-saving optimizations:
  * We might not need to store many encoded versions for less popular videos. Short videos can be encoded on-demand.
@@ -264,8 +264,8 @@ Additional talking points:
    * Video takedowns - videos that violate copyrights, pornography, any other illegal acts need to be removed either during upload flow or based on user flagging.
 
 # Other Designs
-![ExponentPrimeSystemDesign](images/ExponentPrimeSystemDesign.png)
-![IGotAnOffer](images/IGotAnOffer.png)
+![ExponentPrimeSystemDesign](images/alex-xu/ExponentPrimeSystemDesign.png)
+![IGotAnOffer](images/alex-xu/IGotAnOffer.png)
 
 # Artifacts
  * Alex Xu
