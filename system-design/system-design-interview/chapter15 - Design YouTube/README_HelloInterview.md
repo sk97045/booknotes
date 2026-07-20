@@ -96,3 +96,64 @@ segments/720p/segment-0004.ts
 ```
 
 ![data-tables](images/hello-interview/2.png)
+
+## 5. Deep Dives
+
+### 1. Background: Manifest Files
+
+Manifest files are text-based documents describing video streams. Two types exist:
+
+- **Primary manifest**: The "root" file listing all available versions (formats) of a video. Points to media manifest files.
+- **Media manifest**: Lists links to the small segment files (a few seconds each) for one specific version. Acts as an "index" the player uses to stream segments.
+
+### 2. Handling Large Blobs
+
+Multi-gigabyte video uploads **bypass application servers entirely**:
+
+- Direct-to-S3 uploads via **presigned URLs**
+- **Resumable chunked** transfers
+- **CDN** distribution for delivery
+
+The same pattern generalizes to any large-file system (photo storage, document sharing, backups).
+
+### 3. Adaptive Bitrate Streaming
+
+Depends on storing video segments in **multiple formats** plus a **manifest file** (built at upload time) that indexes all segment/format combinations. Client streaming logic:
+
+1. Fetch `VideoMetadata`, which contains the manifest's S3 URL.
+2. Download the manifest file.
+3. Choose a format based on network conditions / user settings, retrieve that segment's URL from the manifest, and download the first segment.
+4. Play the segment while downloading subsequent ones.
+5. **Adapt** the format as network conditions change — dropping to more compressed, lower-resolution segments when bandwidth falls to avoid playback interruption.
+
+### 4. Upload Chunks vs. Playback Segments
+
+These solve **different problems**:
+
+| | Upload Chunk | Video Segment |
+|---|---|---|
+| **Purpose** | Transport / resumability | Playback |
+| **Sizing** | Fixed-size bytes (e.g. 10 MB) | Time-aligned clips (e.g. 4s) |
+| **Created by** | Client | Video Splitter |
+| **Used for** | Resuming interrupted uploads | Transcoding (360p/720p), manifest requests |
+
+The backend still splits/repackages the completed video because **upload chunk boundaries aren't guaranteed to be playable video boundaries**.
+
+### 5. Resumable Uploads
+
+1. Client divides the file into **~5–10 MB chunks**, each with a **fingerprint hash**.
+2. `VideoMetadata` holds a `chunks` list — each entry a JSON with `fingerprint` and `status`.
+3. Client POSTs to the backend to initialize all chunks with status `NotUploaded`.
+4. Client uploads each chunk to S3.
+5. On part upload, S3 returns a **part number + ETag**; client relays this (e.g. `PATCH /videos/{id}/chunks`) so the server verifies fingerprint/ETag via S3 APIs and marks the chunk `Uploaded`.
+6. On `CompleteMultipartUpload`, S3 emits an **exactly-once** object notification (`ObjectCreated:CompleteMultipartUpload`) that kicks off downstream processing; chunk-level progress stays client-driven.
+7. **Resume**: client refetches `VideoMetadata` to see uploaded chunks and skip them.
+
+### 6. Hot Videos / Scaling Reads
+
+The read-to-write ratio is **extreme** — a viral video is uploaded once but watched millions of times, creating read hotspots. Mitigations:
+
+- **Cassandra tuning**: replicate metadata across several nodes so multiple nodes can service queries.
+- **Distributed cache**: LRU eviction, partitioned on `videoId`, storing popular video metadata to insulate the DB.
+- **CDN** distribution for the video content itself.
+- **Read replicas** for database read scaling.
