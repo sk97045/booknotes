@@ -161,29 +161,7 @@ From the merchant's view it's one pipeline; architecturally it's **two stories s
 
 `POST /v1/holds` → API validates + checks `idempotency_keys` (duplicates return stored response) → hold service routes by **account number prefix** to the right downstream adapter → synchronous forward within a tight timeout budget → on approval: write `transactions(status=hold_approved)`, populate Redis, return; on decline: record `hold_declined`, return. **Strictly synchronous end-to-end** to meet the 500 ms p95.
 
-```mermaid
-sequenceDiagram
-    participant M as Merchant POS
-    participant A as API Tier
-    participant H as Hold Service
-    participant D as Downstream Adapter
-    participant P as PostgreSQL
-    participant R as Redis
-
-    M->>A: POST /v1/holds (idempotency_key)
-    A->>P: check idempotency_keys
-    alt key exists
-        P-->>A: stored response
-        A-->>M: original result (no new hold)
-    else new request
-        A->>H: authorize
-        H->>D: sync auth (timeout budget)
-        D-->>H: APPROVE / DENY
-        H->>P: write transactions (hold_approved)
-        H->>R: cache hold status
-        H-->>M: transaction_id, status, expires_at
-    end
-```
+![data-tables](images/hack2hire/3.png)
 
 ### Flow 2 — Charge submission (durable acceptance)
 
