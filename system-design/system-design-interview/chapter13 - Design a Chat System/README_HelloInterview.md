@@ -28,6 +28,7 @@
 ### ShowOffer
 ![data-tables](images/show-offer/1.png)
 ![data-tables](images/show-offer/2.png)
+![data-tables](images/show-offer/4.png)
 ![data-tables](images/show-offer/3.png)
 
 
@@ -36,136 +37,83 @@
 
 ## Deep Dives (~10 min)
 
-### WhatsApp / Chat — Last-Minute Deep Dive Notes
 
-> **One-line thesis:** *Durability lives in the DB (Inbox/Message tables), real-time delivery is best-effort (Pub/Sub) — everything reconciles against the Inbox on reconnect.*
+### DD1 — Message Ordering Consistency
 
----
+**Problem:** `Client → Gateway → Chat Server → WS Server → Devices`. Concurrent sends from different devices/regions interleave by network timing, not intent → out-of-order views in group chats. Amplified at scale.
 
-### 1. Scaling to billions of users (routing / "host confusion")
+**Options:**
 
-**Problem:** Single host can't serve ~200M concurrent connections. Scale out Chat Servers → but sender and recipient may land on *different* servers, so a server holding a message may not hold the recipient's connection.
-
-**Options (rejected → chosen):**
-
-| Approach | Verdict | Why |
+| Option | Mechanism | Verdict |
 |---|---|---|
-| LB + horizontal scale, nothing else | ❌ Broken | No guarantee the server has the recipient's connection. Can't deliver. |
-| Kafka topic per user | ❌ Broken | Kafka not built for billions of topics (~50KB overhead each → 50TB+ for 1B users). "Super topics" just reinvent worse versions of the options below. |
-| Consistent-hash users → specific Chat Server (ZooKeeper/Etcd registry) | ⚠️ Good | Deterministic ownership, direct delivery. But every server must connect to every other server → **big servers, small count**. Scaling requires careful connection-draining to avoid thundering herd; dual-publish during rebalancing to avoid dropped messages. |
-| **Redis Pub/Sub** (channel per userID) | ✅ Chosen | Lightweight in-memory hashmap of socket pointers, no persistence. Shard channels across a Redis cluster by userID. |
+| 1. Client timestamps | Client stamps time, server trusts it | ❌ Unsynced clocks, spoofable — too fragile |
+| 2. Server seq # per chat | Atomic per-chat counter (`chat_456 → seq=502`) at ingestion | ✅ Correct even with concurrent sends; bottleneck unless chat pinned to one shard. Good for medium scale |
+| 3. **Kafka ordered ingestion (pick)** | Hash `chat_id` → partition; Kafka enforces per-partition order; consumer assigns `sequence_number`, writes in order | ✅ Horizontal scale (add partitions), decouples ingest from persist, enables async moderation/analytics. Cost: Kafka ops, offsets, retries |
 
-**Redis Pub/Sub write path (order matters):**
-1. Write to Message table + create Inbox entries **(durable)**
-2. Return success to sender
-3. Publish to Pub/Sub for real-time delivery **(best-effort)**
+**Key line:** Kafka gives strict order *per partition* — `chat_id` as partition key scopes ordering (Kafka partition key ≈ SQS MessageGroupId analog).
 
-→ If step 3 fails, message is safe; recipient gets it on reconnect (Inbox sync) or via polling.
+**⚠️ Hot Shard — Celebrity Chat Problem:** `#all-hands` / town-hall / celebrity threads overwhelm one partition + consumer while others idle → back-pressure, tail latency on that chat, stuck fanout. **Mitigate:** dedicated topics for hot chats · hybrid fanout (Redis for high-fanout rooms) · dedicated fanout workers to isolate hot chats. *Always flag hot shards in interview — signals operational maturity.*
 
-**Key facts to drop:**
-- Pub/Sub is **at-most-once** — no subscriber / transient failure = message lost. Acceptable *because* of the durable write-first ordering.
-- Scalability is a non-issue: Canva benchmark = 100K updates/sec on one Redis host at 27% util. Pub/Sub is "dumb," just forwarding.
-- Cost: extra single-digit-ms latency (ferrying via Redis) + N connections per Chat Server ↔ Redis cluster (small, surmountable).
-
-**Partition by user or by chat?**
-- Depends on (a) chats per user, (b) chat size.
-- WhatsApp = mostly 1:1 + hard cap of 100 participants → **partition by user**. Per-chat channels create redundant subscriptions for little gain.
-- **Senior edge case (celebrity problem):** large chats are the rare case disproportionately stressing the system. Fix = *adaptive partitioning*: for chats > threshold (~25 users), subscribe to a per-chat channel too; publish to chat-channel when chat is large. Watch the transition — dual-publish briefly so servers have time to subscribe.
+*DDIA anchor: Ch. 5 (ordering/replication logs), Ch. 8 (ordering guarantees, total order broadcast via a log).*
 
 ---
 
-### 2. Multiple clients per user (phone + laptop + tablet)
+### DD2 — WebSocket Infra Scalability & Active Session Lookup
 
-Can't rely on a per-*user* Inbox anymore (laptop was off, must catch up independently).
+**Problem at 100M+ concurrent sessions:** (1) session-populate lookups too expensive per-message, (2) connect/disconnect churn breaks fanout correctness, (3) DB write/read pressure.
 
-**Changes:**
-- New **Clients table** keyed by userID → resolve user to 1..N active clients.
-- Inbox becomes **per-client**, not per-user.
-- Chat participant lookup expands to all clients of each user.
-- Send → deliver to all clients of the user.
-- **Pub/Sub unchanged** — still subscribe by userID.
-- Need **deactivation** of dead clients (stop storing for them) + a **limit (~3 clients/account)** to cap storage/throughput.
+#### Bottleneck 1 — Active Session Populate → Pub/Sub Fanout
+Don't DB-query per message to find online devices. Instead:
+- **Publish once** to `chat_channel:<chat_id>` (Redis Streams / Kafka / NATS)
+- **Selective subscription** — each WS server subscribes *only* to channels for its connected users (no global broadcast)
+- **Local filtering** — on message arrival, WS server uses local session map to forward; no Redis/DB lookup
+- **Offline** — not connected → falls back to inbox update / push notification
 
----
+#### Bottleneck 2 — WS Server Churn (users moving between nodes)
+Risk: stale subscriptions on old server, wasted fanout, subscribe races on rapid reconnect. **Goal: exactly one WS server owns a user's channels.**
 
-### 3. WebSocket connection failure (silent death)
+| Option | Mechanism | Verdict |
+|---|---|---|
+| 1. Subscribe-all on connect | On connect, sub to all user's chats via `chat_members` | ❌ Reconnect → two servers subscribed, duplicate fanout, memory pressure |
+| 2. **Leased ownership + Redis TTL (pick)** | `SET user:<id> = <ws_id> NX EX 10`, heartbeat `PEXPIRE`; only lease-holder subscribes | ✅ One owner per user, no dupes. Cost: lease-expiry / reconnect-race edge cases |
 
-TCP keepalives take *minutes* — far too slow. Socket can look "open" but be functionally dead.
+**Lease flow:** ws-1 sets lease (EX 10) + heartbeats → drop stops heartbeats → lease expires after TTL → reconnect to ws-2, `SET NX` succeeds → ws-2 becomes owner, subscribes → Redis delivers only to ws-2, no wasted fanout to ws-1.
 
-**Layered approach:**
+#### Bottleneck 3 — Backend Storage Pressure
+Every message = N inbox writes (N recipients) + fanout events → millions writes/sec; reconnect storms hammer `chat_members` / `device_sessions` / recent messages. **Two strategies (enough for interview):**
+1. **Horizontal partitioning** — shard `messages` by `chat_id`, `inbox` by `recipient_user_id` (NoSQL / DynamoDB composite keys). Trade-off: cross-shard queries (user's recent chats) via query fanout / index denormalization.
+2. **Read-optimized caching** — Redis/Memcached for `user:<id>:chats`, `user:<id>:devices`, `chat:<id>:recent_messages`; update async via CDC. Trade-off: invalidation on membership change, race consistency → tune TTLs.
 
-1. **Do nothing** ❌ — TCP eventually times out; user misses messages meanwhile. Unacceptable.
-2. **ACK + retry on send** — server waits for client ACK (500–2000ms), retries, then closes socket after a few failures → forces reconnect + Inbox sync. Reuses the existing Inbox-clearing ACK. *Gap: only detects failure when actively sending.*
-3. **Heartbeats (chosen backstop)** — server pings every 10–30s; client must pong within ~5s or socket closes.
-   - Detects dead connections in **seconds, not minutes**.
-   - Guaranteed upper bound: interval + timeout (e.g. 10s + 5s = detect within 15s).
-   - Overhead: 200M users × 10s interval = ~20M ping/pong per sec — fine, tiny messages.
-
----
-
-### 4. Redis dropped a message (at-most-once) — fast recovery for *connected* clients
-
-Durability already handled (Inbox write-first ⇒ eventual delivery). Question is how connected clients quickly notice a drop.
-
-1. **Periodic poll / sync** — client sends sync every 30–60s, server checks Inbox. *Cost:* 200M users / 30s ≈ **7M QPS** just for syncs. Tunable knob (latency ↔ load). "Good enough."
-2. **Per-chat sequence numbers** — monotonic seq per chat via Redis `INCR`. Client sees #5 but last saw #3 → knows #4 missing → re-sync. *Gap: only detects on receipt; quiet chat hides the gap.*
-3. **Heartbeat + global per-user sequence (chosen combo):**
-   - Single incrementing counter per user; every message to them increments it.
-   - Server piggybacks current seq on the heartbeat ping.
-   - Client's local seq behind server's → immediate sync request.
-   - Fast detection (within one heartbeat), near-zero extra load (heartbeat already exists).
-   - Cost: atomic counter (Redis `INCR`) = extra coordination/dependency.
-
-**Production reality = all three:** heartbeats detect dead sockets, sequence numbers detect missed messages, polling is the final backstop.
+*DDIA anchor: Ch. 6 (partitioning by key, hot spots), Ch. 11 (stream processing / CDC), Ch. 1 (caching read amplification).*
 
 ---
 
-### 5. Out-of-order messages
+### DD3 — Multi-Device Management
 
-**We don't reorder.** Guaranteeing send-order is expensive (buffering delays + reordering, cf. Flink bounded-out-of-orderness watermarks) and users prefer *fast* over *ordered*.
+**Problem:** user on phone + laptop + tablet. Must: real-time to all active devices · stay in sync (dedupe, order) · reliable replay on reconnect · no dup/missing fanout.
 
-- Chat Servers sync clocks via **NTP** (good, not perfect).
-- Server **stamps message on receipt**; clients display ordered by that server timestamp → consistent ordering across all clients.
-- Occasionally a message "pops in above" a later one. **Users find this acceptable.**
+**Solution: Per-Device Session Registry + Inbox Replay**
+1. **Connect** → register `device_sessions:{user_id}:{device_id} → ws_connection` (Redis/in-memory)
+2. **Fanout** → WS server looks up *all* active sessions for recipient, sends to each device
+3. **Offline fallback** → store in `inbox`, keyed by `(user_id, device_id)` → queued for reconnect
+4. **Reconnect** → check inbox for `(user_id, device_id)`, deliver missed, mark delivered
 
----
+**Dedupe (critical):** same message can arrive twice — WS on one device + inbox replay after reconnect on another. Fix:
+- Global unique `message_id` assigned at ingestion
+- Client keeps local cache of recent `message_id`s (~1000)
+- On receive: new → render + store; seen → silently drop
 
-### 6. "Last seen"
+Consistent UX across reconnects/devices/paths **without** perfect backend dedupe.
 
-**Naive:** update `lastSeen` on every action (send/receive/heartbeat) ❌ — 200M users × 10–30s heartbeats = millions of writes/sec of near-worthless, instantly-stale data. Even DynamoDB strains; paying for strong consistency we don't need.
-
-**Chosen — write only on disconnect + ask if online:**
-- Two insights: (1) we *know* when a WebSocket connects/disconnects; (2) if a user is online they can answer for themselves.
-- **LastSeen table (DynamoDB):** 1 record/user, updated only on disconnect. Use **conditional expression** (`only update if new ts > existing`) so racing servers don't overwrite a more-recent disconnect.
-- Messages: `getLastSeen {targetUserId, requestingUserId}` and `updateLastSeen {targetUserId, reporter: DATABASE|SERVER, lastSeen: ONLINE|$DATE}`.
-
-**Flow:**
-1. Client publishes `getLastSeen`.
-2. Chat Server, in parallel:
-   - **2a** reads LastSeen table → publishes `updateLastSeen` ($DATE) to requester's channel.
-   - **2b** forwards `getLastSeen` to target's channel.
-3. If target is connected, its Chat Server publishes `updateLastSeen: ONLINE` to requester.
-4. Client merges: got ONLINE → green bubble; else show last disconnect time.
-
-**Trade-offs:** possible delay between the two responses → client waits briefly or updates UI seamlessly. Depends on servers reporting disconnects — if a server dies, users reconnect shortly; for robustness, also write LastSeen **on connect**.
+*DDIA anchor: Ch. 9 (idempotency / exactly-once via dedupe keys), Ch. 11 (delivery semantics).*
 
 ---
 
-## 🔍 Senior-Signal Questions to Ask in Your Interview
+## 🔍 Senior-Signal Questions
+- **Per-chat ordering vs. global ordering — do we actually need total order across chats?** → *Why: shows you scope ordering to the partition and don't over-pay for global consensus.*
+- **What happens during the lease-expiry gap (TTL window) — can messages be missed between ws-1 dropping and ws-2 owning?** → *Why: probes the failure mode of the ownership handoff; inbox replay is the safety net.*
+- **How do you detect and rebalance a hot Kafka partition (celebrity chat) in production?** → *Why: hot-spot handling + operational maturity.*
+- **Is delivery at-least-once or exactly-once end-to-end, and where does the idempotency boundary live?** → *Why: forces the honest answer — at-least-once backend + client dedupe = effectively-once UX.*
+- **On cache/DB divergence (membership change mid-fanout), does a removed member still receive the message?** → *Why: consistency-under-race + invalidation strategy.*
 
-- **"Should Pub/Sub channels be keyed by user or by chat, and would you change that adaptively?"** → *Why it matters: shows you spotted the celebrity/hot-key problem and know partitioning strategy is workload-dependent, not fixed.*
-- **"What's our ordering guarantee — and are we willing to trade it for latency?"** → *Why it matters: signals you understand distributed ordering is expensive and that product UX (fast > perfectly ordered) drives the CAP-ish call.*
-- **"Where exactly does durability live vs. real-time delivery?"** → *Why it matters: the write-first (DB) then publish (best-effort) ordering is the core correctness invariant; getting the order wrong loses messages.*
-- **"How do we detect a silently dead WebSocket, and what's the bounded detection time?"** → *Why it matters: recognizing TCP keepalives are minutes-slow and quantifying heartbeat interval+timeout is a concrete failure-mode answer.*
-- **"How do we avoid a thundering herd / dropped messages when scaling Chat Servers up or down?"** → *Why it matters: connection draining + dual-publish during rebalance is the operational nuance that separates senior from mid-level.*
-
----
-
-## DDIA Anchors
-- **Ch. 5 (Replication)** — DynamoDB LastSeen conditional writes = leaderless conflict avoidance; write-first-then-publish is a replication-ordering choice.
-- **Ch. 8/9 (Distributed trouble / Consistency & Consensus)** — NTP clocks are unreliable but "good enough"; why we *don't* attempt total order. ZooKeeper/Etcd for consistent-hash membership = consensus for coordination.
-- **Ch. 11 (Stream Processing)** — Kafka topic-per-user rejection; Flink watermarks as the "if we *did* reorder" reference.
-
-## Real-World Anchor
-Discord (Bytebytego) runs the same shape: Elixir/Erlang session servers hold WebSocket state, a lightweight fanout layer routes events between session nodes, and durable message history lives in Cassandra — real-time is best-effort over a durable log, exactly the Inbox + Pub/Sub split above.
-## Best Design
+**Real-World Anchor:** Discord uses per-guild routing + Elixir/Erlang sessions for exactly this WS-fanout + presence problem; Slack fronts ingestion with a message log (Kafka-style) to decouple ordering from persistence — the DD1/DD2 split mirrors their production architecture.
