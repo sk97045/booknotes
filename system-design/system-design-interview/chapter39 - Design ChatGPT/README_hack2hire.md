@@ -47,7 +47,42 @@ Ephemeral (not entities, but core state): rate-limit counters, per-user token bu
 
 ---
 
-## 3. API / System Interface (~5 min)
+## 3. Data Model
+
+
+![data-tables](images/hack2hire/1.png)
+
+Durable boundary is intentionally **small**. Postgres owns durable truth; Redis owns the ephemeral hot path.
+
+```
+conversations
+  id (PK), user_id (FK), title, model, created_at, updated_at
+  -- updated_at bumped on every new message (drives list ordering)
+
+messages
+  id (PK), conversation_id (FK), role {user|assistant|system},
+  content, token_count, created_at
+  -- token_count avoids re-tokenizing stored text during context assembly
+
+usage_tracking
+  user_id, period, tokens_used
+  -- durable fallback + audit trail for rate limiting
+```
+
+**Access patterns → indexes:**
+
+- **Context assembly** (hot read): fetch by `conversation_id` ordered by `created_at`, sum `token_count` until budget hit → composite index `(conversation_id, created_at)`. Redis caches assembled context keyed by `conversation_id` + hash of last included `message_id`.
+- **List conversations**: by `user_id` ordered by `updated_at` desc → B-tree `(user_id, updated_at)`.
+- **Append turn**: insert user row at request time; insert assistant row after generation; bump `updated_at`.
+- **Rate-limit check**: read current-period usage from Redis; fall back to `usage_tracking` on miss.
+
+**Storage tradeoff:** the write volume is *moderate* (one user row + one assistant row per request), not billions/day. Relational indexes map cleanly to conversation-scoped access, and Postgres transactions make turn persistence trivially correct — the assistant response is **fully written or absent**. A wide-column store (DynamoDB) would scale writes harder but isn't justified here; Postgres is the simpler, interview-defensible default.
+
+*DDIA Ch. 7 (Transactions):* the "fully written or absent" turn boundary is exactly the atomicity guarantee that lets the server crash mid-generation without corrupting conversation state.
+
+---
+
+## 4. API / System Interface (~5 min)
 
 Three communication modes, each chosen deliberately: **REST** for messages, **SSE** for token streaming, **gRPC** for internal inference dispatch.
 
@@ -87,41 +122,6 @@ Cursor-paginated. Serves both scrollback and **post-drop recovery**: client fetc
 - `DELETE /v1/conversations/{conversation_id}` — remove conversation + messages.
 
 **Why SSE over WebSocket:** token flow is *unidirectional* (server → client). The client's only outbound action — a new message — travels on a separate REST POST. SSE is purpose-built for server-to-client streaming: native over HTTP/2 with multiplexing, browser-handled `EventSource` reconnects, and easier to proxy through CDNs/LBs than WebSocket's bidirectional framing. This matches the real ChatGPT API.
-
----
-
-## 4. Data Model
-
-
-![data-tables](images/hack2hire/1.png)
-
-Durable boundary is intentionally **small**. Postgres owns durable truth; Redis owns the ephemeral hot path.
-
-```
-conversations
-  id (PK), user_id (FK), title, model, created_at, updated_at
-  -- updated_at bumped on every new message (drives list ordering)
-
-messages
-  id (PK), conversation_id (FK), role {user|assistant|system},
-  content, token_count, created_at
-  -- token_count avoids re-tokenizing stored text during context assembly
-
-usage_tracking
-  user_id, period, tokens_used
-  -- durable fallback + audit trail for rate limiting
-```
-
-**Access patterns → indexes:**
-
-- **Context assembly** (hot read): fetch by `conversation_id` ordered by `created_at`, sum `token_count` until budget hit → composite index `(conversation_id, created_at)`. Redis caches assembled context keyed by `conversation_id` + hash of last included `message_id`.
-- **List conversations**: by `user_id` ordered by `updated_at` desc → B-tree `(user_id, updated_at)`.
-- **Append turn**: insert user row at request time; insert assistant row after generation; bump `updated_at`.
-- **Rate-limit check**: read current-period usage from Redis; fall back to `usage_tracking` on miss.
-
-**Storage tradeoff:** the write volume is *moderate* (one user row + one assistant row per request), not billions/day. Relational indexes map cleanly to conversation-scoped access, and Postgres transactions make turn persistence trivially correct — the assistant response is **fully written or absent**. A wide-column store (DynamoDB) would scale writes harder but isn't justified here; Postgres is the simpler, interview-defensible default.
-
-*DDIA Ch. 7 (Transactions):* the "fully written or absent" turn boundary is exactly the atomicity guarantee that lets the server crash mid-generation without corrupting conversation state.
 
 ---
 
