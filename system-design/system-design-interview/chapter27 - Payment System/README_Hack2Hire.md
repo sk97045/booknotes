@@ -46,6 +46,8 @@ These numbers justify: keeping the hold path synchronous and fast, per-processor
 
 ## 2. Core Entities (~2 min)
 
+![data-tables](images/hack2hire/0.png)
+
 - **Transaction** — lifecycle anchor for a hold; owns the state machine (`hold_approved` → … → `settled`).
 - **Charge** — the merchant's capture instruction against an approved hold (amount may include tip).
 - **Batch** — one nightly settlement file per downstream processor.
@@ -55,51 +57,7 @@ These numbers justify: keeping the hold path synchronous and fast, per-processor
 
 **Relationship summary**: one `transactions` row ↔ at most one `charges` row → one `batch_items` row at cutoff → one `batches` row per downstream processor → compared by `reconciliation_records`.
 
-```mermaid
-erDiagram
-    TRANSACTIONS ||--o| CHARGES : "has at most one"
-    CHARGES ||--o| BATCH_ITEMS : "assigned at cutoff"
-    BATCHES ||--|{ BATCH_ITEMS : "groups"
-    BATCHES ||--o{ RECONCILIATION_RECORDS : "compared by"
-    IDEMPOTENCY_KEYS }o--|| TRANSACTIONS : "resolves to"
 
-    TRANSACTIONS {
-        uuid transaction_id PK
-        string merchant_id
-        string account_number
-        decimal hold_amount
-        string status "hold_approved|hold_declined|charged|batched|settled|expired"
-        string idempotency_key
-        string downstream_processor_id
-        timestamp expires_at
-    }
-    CHARGES {
-        uuid charge_id PK
-        uuid transaction_id FK
-        decimal amount "may include tip"
-        string batch_status "pending_batch|batched|settled"
-    }
-    BATCHES {
-        uuid batch_id PK
-        string downstream_processor_id
-        timestamp cutoff_at
-        string s3_file_ref
-        string transmission_status
-    }
-    BATCH_ITEMS {
-        uuid batch_item_id PK
-        uuid batch_id FK
-        uuid charge_id FK
-        string settlement_status "pending|settled|rejected|missing"
-    }
-    RECONCILIATION_RECORDS {
-        uuid record_id PK
-        uuid batch_id FK
-        int matched_count
-        string discrepancy_type
-        string resolution_status
-    }
-```
 
 ### Core invariants
 
