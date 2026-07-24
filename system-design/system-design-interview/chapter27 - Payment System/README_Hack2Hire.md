@@ -167,9 +167,14 @@ From the merchant's view it's one pipeline; architecturally it's **two stories s
 
 `POST /v1/charges` → idempotency check → validate hold (**Redis fast path, PostgreSQL fallback**): `hold_approved`, unexpired, uncharged → amount within tip threshold → write `charges(batch_status=pending_batch)` + `transactions.status=charged` durably → ack. *Ack = durably stored + will enter next batch. Not settled.*
 
+
+![data-tables](images/hack2hire/4.png)
+
 ### Flow 3 — Nightly batch settlement
 
 Four stages (see Data Flow): atomic cutoff sweep → immutable S3 file per processor → transmission → per-item ack ingestion.
+
+![data-tables](images/hack2hire/5.png)
 
 ### Flow 4 — Reconciliation
 
@@ -177,18 +182,7 @@ Compare sent vs. reported per `batch_items` entry → classify `matched` / `miss
 
 ### Transaction lifecycle state machine
 
-```mermaid
-stateDiagram-v2
-    [*] --> hold_approved: downstream approves
-    [*] --> hold_declined: downstream denies
-    hold_approved --> charged: POST /v1/charges (valid, in threshold)
-    hold_approved --> expired: TTL (7d) passes, no charge
-    charged --> batched: nightly cutoff (point of no return)
-    batched --> settled: reconciliation confirms downstream settlement
-    hold_declined --> [*]
-    expired --> [*]
-    settled --> [*]
-```
+![data-tables](images/hack2hire/6.png)
 
 **The critical transition is `charged → batched`**: once batched, a charge cannot be modified or reassigned — this is what makes the batch file a clean, immutable artifact.
 
@@ -247,7 +241,7 @@ The naive version is "query pending, write file, send." The hard parts:
 ### Deep Dive 3 — Reconciliation: closing the trust gap
 
 
-![data-tables](images/hack2hire/2.png)
+![data-tables](images/hack2hire/7.png)
 
 Without reconciliation we hold two record sets — ours and downstream's — with no systematic proof they agree. The service loads all `batch_items`, compares against the downstream response, and classifies:
 
