@@ -16,7 +16,7 @@ Object storage sacrifices performance for high durability, vast scale and low co
 It targets "cold" data and is mainly used for archival and backup.
 There is no hierarchical directory structure, all data is stored as objects in a flat structure.
 It is relatively slow compared to other storage types. Most cloud providers have an object storage offering - Amazon S3, Google GCS, etc.
-![storage-comparison](images/storage-comparison.png)
+![storage-comparison](images/alex/storage-comparison.png)
 
 |                 | Block Storage                    | File Storage                            | Object Storage                 |
 |-----------------|----------------------------------|-----------------------------------------|--------------------------------|
@@ -81,13 +81,13 @@ The inode contains a list of file block pointers, which point to different locat
 When accessing a file, we first fetch its metadata from the inode, prior to fetching the file contents.
 
 Object storage works similarly - metadata store is used for file information, but contents are stored on disk:
-![object-store-vs-unix](images/object-store-vs-unix.png)
+![object-store-vs-unix](images/alex/object-store-vs-unix.png)
 
 By separating metadata from file contents, we can scale the different stores independently:
-![bucket-and-object](images/bucket-and-object.png)
+![bucket-and-object](images/alex/bucket-and-object.png)
 
 ## High-level design
-![high-level-design](images/high-level-design.png)
+![high-level-design](images/alex/high-level-design.png)
  * Load balancer - distributes API requests across service replicas
  * API service - Stateless server, orchestrating calls to metadata and object store, as well as IAM service.
  * Identity and access management (IAM) - central place for auth, authz, access control.
@@ -95,7 +95,7 @@ By separating metadata from file contents, we can scale the different stores ind
  * Metadata store - stores object metadata
 
 ## Uploading an object
-![uploading-object](images/uploading-object.png)
+![uploading-object](images/alex/uploading-object.png)
  * Create a bucket named "bucket-to-share" via HTTP PUT request
  * API service calls IAM to ensure user is authorized and has write permissions
  * API service calls metadata store to create a bucket entry. Once created, success response is returned.
@@ -128,7 +128,7 @@ Date: Sun, 12 Sept 2021 18:30:01 GMT
 Authorization: authorization string
 ```
 
-![download-object](images/download-object.png)
+![download-object](images/alex/download-object.png)
  * Client sends an HTTP GET request to the load balancer, ie `GET /bucket-to-share/script.txt`
  * API service queries IAM to verify the user has correct permissions to read the bucket
  * Once validated, UUID of object is retrieved from metadata store
@@ -138,10 +138,10 @@ Authorization: authorization string
 # Step 3 - Design Deep Dive
 ## Data store
 Here's how the API service interacts with the data store:
-![data-store-interactions](images/data-store-interactions.png)
+![data-store-interactions](images/alex/data-store-interactions.png)
 
 The data store's main components:
-![data-store-main-components](images/data-store-main-components.png)
+![data-store-main-components](images/alex/data-store-main-components.png)
 
 The data routing service provides a RESTful or gRPC API to access the data node cluster.
 It is a stateless service, which scales by adding more servers.
@@ -153,7 +153,7 @@ It's main responsibilities are:
 
 The placement service determines which data nodes should store an object.
 It maintains a virtual cluster map, which determines the physical topology of a cluster.
-![virtual-cluster-map](images/virtual-cluster-map.png)
+![virtual-cluster-map](images/alex/virtual-cluster-map.png)
 
 The service also sends heartbeats to all data nodes to determine if they should be removed from the virtual cluster.
 
@@ -170,7 +170,7 @@ The heartbeat includes:
  * How much data is stored on each drive?
 
 ### Data persistence flow
-![data-persistence-flow](images/data-persistence-flow.png)
+![data-persistence-flow](images/alex/data-persistence-flow.png)
  * API service forwards the object data to data store
  * Data routing service sends the data to the primary data node
  * Primary data node saves the data locally and replicates it to two secondary data nodes. Response is sent after successful replication.
@@ -179,7 +179,7 @@ The heartbeat includes:
 Caveats:
  * Given an object UUID, it's replication group is deterministically chosen by using consistent hashing
  * In step 4, the primary data node replicates the object data before returning a response. This favors strong consistency over higher latency.
-![consistency-vs-latency](images/consistency-vs-latency.png)
+![consistency-vs-latency](images/alex/consistency-vs-latency.png)
 
 ### How data is organized
 One simple approach to managing data is to store each object in a separate file. 
@@ -189,7 +189,7 @@ This works, but is not performant with many small files in a file system:
  * Many files means many inodes. Operating systems don't deal well with too many inodes and there is also a max inode limit.
 
 These issues can be addressed by merging many small files into bigger ones via a write-ahead log (WAL). Once the file reaches its capacity (typically a few GB), a new file is created:
-![wal-optimization](images/wal-optimization.png)
+![wal-optimization](images/alex/wal-optimization.png)
 
 The downside of this approach is that write access to the file needs to be serialized. Multiple cores accessing the same file must wait for each other.
 To fix this, we can confine files to specific cores to avoid lock contention.
@@ -217,7 +217,7 @@ so we can deploy the relational db within the data node itself.
 SQLite is a good option as it's a lightweight file-based relational database.
 
 ### Updated data persistence flow
-![updated-data-persistence-flow](images/updated-data-persistence-flow.png)
+![updated-data-persistence-flow](images/alex/updated-data-persistence-flow.png)
  * API Service sends a request to save a new object
  * Data node service appends the new object at the end of a file, named "/data/c"
  * A new record for the object is inserted into the object mapping table
@@ -228,22 +228,22 @@ Data durability is an important requirement in our design. In order to achieve 6
 First problem to address is hardware failures. We can achieve that by replicating data nodes to minimize probability of failure.
 But in addition to that, we also ought to replicate across different failure domains (cross-rack, cross-dc, separate networks, etc). 
 A critical event can cause multiple hardware failures within the same domain:
-![failure-domain-isolation](images/failure-domain-isolation.png)
+![failure-domain-isolation](images/alex/failure-domain-isolation.png)
 
 Assuming annual failure rate of a typical HDD is 0.81%, making three copies gives us 6 nines of durability.
 
 Replicating the data nodes like that grants us the durability we want, but we could also leverage erasure coding to reduce storage costs.
 
 Erasure coding enables us to use parity bits, which allow us to reconstruct lost bits in the event of a failure:
-![erasure-coding](images/erasure-coding.png)
+![erasure-coding](images/alex/erasure-coding.png)
 
 Imagine those bits are data nodes. If two of them go down, they can be recovered using the remaining four ones.
 
 There are different erasure coding schemes. In our case, we could use 8+4 erasure coding, split across different failure domains to maximize reliability:
-![erasure-coding-across-failure-domains](images/erasure-coding-across-failure-domains.png)
+![erasure-coding-across-failure-domains](images/alex/erasure-coding-across-failure-domains.png)
 
 Erasure coding enables us to achieve a much lower storage cost (50% improvement) at the expense of access speed due to the data routing service having to collect data from multiple locations:
-![erasure-coding-vs-replication](images/erasure-coding-vs-replication.png)
+![erasure-coding-vs-replication](images/alex/erasure-coding-vs-replication.png)
 
 Other caveats:
  * Replication requires 200% storage overhead (in case of 3 replicas) vs. 50% via erasure coding
@@ -259,14 +259,14 @@ If a disk fails entirely, then the failure is easy to detect. This is less strai
 To detect this, we can use checksums - a hash of the file contents, which can be used to verify the file's integrity.
 
 In our case, we'll store checksums for each file and each object:
-![checksums-for-correctness](images/checksums-for-correctness.png)
+![checksums-for-correctness](images/alex/checksums-for-correctness.png)
 
 In the case of erasure coding (8+4), we'll need to fetch each of the 8 pieces of data separately and verify each of their checksums.
 
 // sprint 2
 ## Metadata data model
 Table schemas:
-![metadata-data-model](images/metadata-data-model.png)
+![metadata-data-model](images/alex/metadata-data-model.png)
 
 Queries we need to support:
  * Find an object ID by name
@@ -300,14 +300,14 @@ That would make our listing query sufficiently fast as it's isolated to a single
 Versioning works by having another `object_version` column which is of type TIMEUUID, enabling us to sort records based on it.
 
 Each new version produces a new `object_id`:
-![object-versioning](images/object-versioning.png)
+![object-versioning](images/alex/object-versioning.png)
 
 Deleting an object creates a new version with a special `object_id` indicating that the object was deleted. Queries for it return 404:
-![deleting-versioned-object](images/deleting-versioned-object.png)
+![deleting-versioned-object](images/alex/deleting-versioned-object.png)
 
 ## Optimizing uploads of large files
 Uploading large files can be optimized by using multipart uploads - splitting a big file into several chunks, uploaded independently:
-![multipart-upload](images/multipart-upload.png)
+![multipart-upload](images/alex/multipart-upload.png)
  * Client calls service to initiate a multipart upload
  * Data store returns an upload ID which uniquely identifies the upload
  * Client splits the large file into several chunks, uploaded independently using the upload id
@@ -330,7 +330,7 @@ To facilitate the deletion, we'll use a process called compaction:
  * Garbage collector copies objects which are not deleted from "data/b" to "data/d"
  * `object_mapping` table is updated once copying is complete using a database transaction
  * To avoid making too many small files, compaction is done on files which grow beyond a certain threshold
-![compaction](images/compaction.png)
+![compaction](images/alex/compaction.png)
 
 # Step 4 - Wrap Up
 Things we covered:
