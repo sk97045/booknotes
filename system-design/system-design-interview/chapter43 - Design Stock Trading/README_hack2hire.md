@@ -246,6 +246,7 @@ Each fix maps to one component: **a hold ledger**, **an async exchange boundary*
 
 ### Architecture
 
+<br><br><br><br><br><br><br><br><br><br><br><br>
 ![data-tables](images/hack2hire/3.png)
 
 **Reading the diagram:** the red path (Order → Account → Postgres) is the **correctness path** — one serializable transaction, synchronous, under the 500ms budget. The blue/green paths are the **truth path** — asynchronous, driven by the exchange, reconciled by the poller. The dashed purple poller is not error handling; it runs continuously as a **safety net**.
@@ -254,6 +255,7 @@ Each fix maps to one component: **a hold ledger**, **an async exchange boundary*
 
 ### Flow 1 — Order placement (the correctness path)
 
+<br><br><br><br><br><br><br><br><br><br><br><br>
 ![data-tables](images/hack2hire/4.png)
 
 The whole point of this diagram is the horizontal line at y=362: **the user's response returns before the exchange is ever contacted.** Everything below that line is the broker's problem, not the user's wait.
@@ -396,6 +398,7 @@ This is the **end-to-end argument** again (*DDIA Ch. 12.3*): no amount of retry/
 
 ### Deep Dive 3 — The cancel-fill race
 
+<br><br><br><br><br><br><br><br><br><br><br><br>
 The signature edge case. User taps cancel. At that same instant the exchange matches the order. Both events are valid. Both arrive concurrently. **Only one terminal state can win.**
 
 **The principle: the exchange is the authority on execution.** The broker *requests* a cancel; the exchange *decides*. The broker's job is to faithfully record whichever outcome the exchange reports — not to adjudicate.
