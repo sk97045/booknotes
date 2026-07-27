@@ -52,7 +52,7 @@ Traditional message queues typically don't support data retention and don't prov
 
 # Step 2 - Propose high-level design and get buy-in
 Key components of a message queue:
-![message-queue-components](images/message-queue-components.png)
+![message-queue-components](images/alexxu/message-queue-components.png)
  * Producer sends messages to a queue
  * Consumer subscribes to a queue and consumes the subscribed messages
  * Message queue is a service in the middle which decouples producers from consumers, letting them scale independently.
@@ -60,20 +60,20 @@ Key components of a message queue:
 
 ## Messaging models
 The first type of messaging model is point-to-point and it's commonly found in traditional message queues:
-![point-to-point-model](images/point-to-point-model.png)
+![point-to-point-model](images/alexxu/point-to-point-model.png)
  * A message is sent to a queue and it's consumed by exactly one consumer.
  * There can be multiple consumers, but a message is consumed only once.
  * Once message is acknowledged as consumed, it is removed from the queue.
  * There is no data retention in the point-to-point model, but there is such in our design.
 
 On the other hand, the publish-subscribe model is more common for event streaming platforms:
-![publish-subscribe-model](images/publish-subscribe-model.png)
+![publish-subscribe-model](images/alexxu/publish-subscribe-model.png)
  * In this model, messages are associated to a topic.
  * Consumers are subscribed to a topic and they receive all messages sent to this topic.
 
 ## Topics, partitions and brokers
 What if the data volume for a topic is too large? One way to scale is by splitting a topic into partitions (aka sharding):
-![partitions](images/partitions.png)
+![partitions](images/alexxu/partitions.png)
  * Messages sent to a topic are evenly distributed across partitions
  * The servers that host partitions are called brokers
  * Each topic operates like a queue using FIFO for message processing. Message order is preserved within a partition.
@@ -84,7 +84,7 @@ What if the data volume for a topic is too large? One way to scale is by splitti
 
 ## Consumer groups
 Consumer groups are a set of consumers working together to consume messages from a topic:
-![consumer-groups](images/consumer-groups.png)
+![consumer-groups](images/alexxu/consumer-groups.png)
  * Messages are replicated per consumer group (not per consumer).
  * Each consumer group maintains its own offset.
  * Reading messages in parallel by a consumer group improves throughput but hampers the ordering guarantee.
@@ -92,7 +92,7 @@ Consumer groups are a set of consumers working together to consume messages from
  * This means that we can't have more consumers in a group than there are partitions.
 
 ## High-level architecture
-![high-level-architecture](images/high-level-architecture.png)
+![high-level-architecture](images/alexxu/high-level-architecture.png)
  * Clients are producer and consumer. Producer pushes messages to a designated topic. Consumer group subscribes to messages from a topic.
  * Brokers hold multiple partitions. A partition holds a subset of messages for a topic.
  * Data storage stores messages in partitions.
@@ -117,7 +117,7 @@ What are our options:
  * Write-ahead log (WAL) - a plain text file which only supports appending to it and is very HDD-friendly. 
    * We split partitions into segments to avoid maintaining a very large file.
    * Old segments are read-only. Writes are accepted by latest segment only.
-![wal-example](images/wal-example.png)
+![wal-example](images/alexxu/wal-example.png)
 
 WAL files are extremely efficient when used with traditional HDDs. 
 
@@ -129,7 +129,7 @@ We also piggyback on the fact that the OS caches disk data in memory aggressivel
 It is important that the message schema is compliant between producer, queue and consumer to avoid extra copying. This allows much more efficient processing.
 
 Example message structure:
-![message-structure](images/message-structure.png)
+![message-structure](images/alexxu/message-structure.png)
 
 The key of the message specifies which partition a message belongs to. An example mapping is `hash(key) % numPartitions`.
 For more flexibility, the producer can override default keys in order to control which partitions messages are distributed to.
@@ -167,7 +167,7 @@ If tuned for throughput, we might need more partitions per topic to compensate f
 If a producer wants to send a message to a partition, which broker should it connect to?
 
 One option is to introduce a routing layer, which route messages to the correct broker. If replication is enabled, the correct broker is the leader replica:
-![routing-layer](images/routing-layer.png)
+![routing-layer](images/alexxu/routing-layer.png)
  * Routing layer reads the replication plan from the metadata store and caches it locally.
  * Producer sends a message to the routing layer.
  * Message is forwarded to broker 1 who is the leader of the given partition
@@ -180,19 +180,19 @@ This approach works but has some drawbacks:
  * The design doesn't enable batching messages
 
 To mitigate these issues, we can embed the routing layer into the producer:
-![routing-layer-producer](images/routing-layer-producer.png)
+![routing-layer-producer](images/alexxu/routing-layer-producer.png)
  * Fewer network hops lead to lower latency
  * Producers can control which partition a message is routed to
  * The buffer allows us to batch messages in-memory and send out larger batches in a single request, which increases throughput.
 
 The batch size choice is a classical trade-off between throughput and latency. 
-![batch-size-throughput-vs-latency](images/batch-size-throughput-vs-latency.png)
+![batch-size-throughput-vs-latency](images/alexxu/batch-size-throughput-vs-latency.png)
  * Larger batch size leads to longer wait time before batch is committed. 
  * Smaller batch size leads to request being sent sooner and having lower latency but lower throughput.
 
 ## Consumer flow
 The consumer specifies its offset in a partition and receives a chunk of messages, beginning from that offset:
-![consumer-example](images/consumer-example.png)
+![consumer-example](images/alexxu/consumer-example.png)
 
 One important consideration when designing the consumer is whether to use a push or a pull model:
  * Push model leads to lower latency as broker pushes messages to consumer as it receives them.
@@ -205,7 +205,7 @@ One important consideration when designing the consumer is whether to use a push
    * The down side is the higher latency and extra network calls when there are no new messages. Latter issue can be mitigated using long polling (as it allows pulls to wait a specified amount of time for new messages)
 
 Hence, most message queues (and us) choose the pull model.
-![consumer-flow](images/consumer-flow.png)
+![consumer-flow](images/alexxu/consumer-flow.png)
  * A new consumer subscribes to topic A and joins group 1.
  * The correct broker node is found by hashing the group name. This way, all consumers in a group connect to the same broker.
  * Note that this consumer group coordinator is different from the coordination service (ZooKeeper).
@@ -220,16 +220,16 @@ Consumer rebalancing is responsible for deciding which consumers are responsible
 This process occurs when a consumer joins/leaves or a partition is added/removed.
 
 The broker, acting as a coordinator plays a huge role in orchestrating the rebalancing workflow.
-![consumer-rebalancing](images/consumer-rebalancing.png)
+![consumer-rebalancing](images/alexxu/consumer-rebalancing.png)
  * All consumers from the same group are connected to the same coordinator. The coordinator is found by hashing the group name.
  * When the consumer list changes, the coordinator chooses a new leader of the group.
  * The leader of the group calculates a new partition dispatch plan and reports it back to the coordinator, which broadcasts it to the other consumers.
 
 When the coordinator stops receiving heartbeats from the consumers in a group, a rebalancing is triggered:
-![consumer-rebalance-example](images/consumer-rebalance-example.png)
+![consumer-rebalance-example](images/alexxu/consumer-rebalance-example.png)
 
 Let's explore what happens when a consumer joins a group:
-![consumer-join-group-usecase](images/consumer-join-group-usecase.png)
+![consumer-join-group-usecase](images/alexxu/consumer-join-group-usecase.png)
  * Initially, only consumer A is in the group and it consumes all partitions.
  * Consumer B sends a request to join the group.
  * The coordinator notifies all group members that it's time to rebalance passively - as a response to the heartbeat.
@@ -238,18 +238,18 @@ Let's explore what happens when a consumer joins a group:
  * Consumers start consuming from the newly assigned partitions.
 
 Here's what happens when a consumer leaves the group:
-![consumer-leaves-group-usecase](images/consumer-leaves-group-usecase.png)
+![consumer-leaves-group-usecase](images/alexxu/consumer-leaves-group-usecase.png)
  * Consumer A and B are in the same group
  * Consumer B asks to leave the group
  * When coordinator receives A's heartbeat, it informs them that it's time to rebalance.
  * The rest of the steps are the same.
 
 The process is similar when a consumer doesn't send a heartbeat for a long time:
-![consumer-no-heartbeat-usecase](images/consumer-no-heartbeat-usecase.png)
+![consumer-no-heartbeat-usecase](images/alexxu/consumer-no-heartbeat-usecase.png)
 
 ## State storage
 The state storage stores mapping between partitions and consumers, as well as the last consumed offsets for a partition.
-![state-storage](images/state-storage.png)
+![state-storage](images/alexxu/state-storage.png)
 
 Group 1's offset is at 6, meaning all previous messages are consumed. If a consumer crashes, the new consumer will continue from that message on wards.
  
@@ -271,7 +271,7 @@ Zookeeper is a good choice for this storage.
 Zookeeper is essential for building distributed message queues.
 
 It is a hierarchical key-value store, commonly used for a distributed configuration, synchronization service and naming registry (ie service discovery).
-![zookeeper](images/zookeeper.png)
+![zookeeper](images/alexxu/zookeeper.png)
 
 With this change, the broker only needs to maintain data for the messages. Metadata and state storage is in Zookeeper.
 
@@ -279,7 +279,7 @@ Zookeeper also helps with leader election of the broker replicas.
 
 ## Replication
 In distributed systems, hardware issues are inevitable. We can tackle this via replication to achieve high availability.
-![replication-example](images/replication-example.png)
+![replication-example](images/alexxu/replication-example.png)
  * Each partition is replicated across multiple brokers, but there is only one leader replica.
  * Producers send messages to leader replicas
  * Followers pull the replicated messages from the leader
@@ -294,7 +294,7 @@ In-sync replicas (ISR) are replicas for a partition that stay in-sync with the l
 
 The `replica.lag.max.messages` defines how many messages can a replica be lagging behind the leader to be considered in-sync.
 
-![in-sync-replicas-example](images/in-sync-replicas-example.png)
+![in-sync-replicas-example](images/alexxu/in-sync-replicas-example.png)
  * Committed offset is 13
  * Two new messages are written to the leader, but not committed yet.
  * A message is committed once all replicas in the ISR have synchronized that message
@@ -308,13 +308,13 @@ ISR reflects a trade-off between performance and durability.
 Acknowledgment handling is configurable.
 
 `ACK=all` means that all replicas in ISR have to sync a message. Message sending is slow, but message durability is highest.
-![ack-all](images/ack-all.png)
+![ack-all](images/alexxu/ack-all.png)
 
 `ACK=1` means that producer receives acknowledgment once leader receives the message. Message sending is fast, but message durability is low.
-![ack-1](images/ack-1.png)
+![ack-1](images/alexxu/ack-1.png)
 
 `ACK=0` means that producer sends messages without waiting for any acknowledgment from leader. Message sending is fastest, message durability is lowest.
-![ack-0](images/ack-0.png)
+![ack-0](images/alexxu/ack-0.png)
 
 On the consumer side, we can connect all consumers to the leader for a partition and let them read messages from it:
  * This makes for the simplest design and easiest operation
@@ -340,7 +340,7 @@ Consumer groups are rebalancing, so that help us achieve scalability and fault t
 
 ### Broker
 How do brokers handle failure?
-![broker-failure-recovery](images/broker-failure-recovery.png)
+![broker-failure-recovery](images/alexxu/broker-failure-recovery.png)
  * Once a broker fails, there are still enough replicas to avoid partition data loss
  * A new leader is elected and the broker coordinator redistributes partitions which were at the failed broker to existing replicas
  * Existing replicas pick up the new partitions and act as followers until they're caught up with the leader and become ISR
@@ -351,7 +351,7 @@ Additional considerations to make the broker fault-tolerant:
  * If all replicas of a partition crash, then the data is lost forever. Spreading replicas across data centers can help, but it adds up a lot of latency. One option is to use [data mirroring](https://cwiki.apache.org/confluence/pages/viewpage.action?pageId=27846330) as a work around.
 
 How do we handle redistribution of replicas when a new broker is added?
-![broker-replica-redistribution](images/broker-replica-redistribution.png)
+![broker-replica-redistribution](images/alexxu/broker-replica-redistribution.png)
  * We can temporarily allow more replicas than configured, until new broker catches up
  * Once it does, we can remove the partition replica which is no longer needed
 
@@ -359,10 +359,10 @@ How do we handle redistribution of replicas when a new broker is added?
 Whenever a new partition is added, the producer is notified and consumer rebalancing is triggered.
 
 In terms of data storage, we can only store new messages to the new partition vs. trying to copy all old ones:
-![partition-exmaple](images/partition-exmaple.png)
+![partition-exmaple](images/alexxu/partition-exmaple.png)
 
 Decreasing the number of partitions is more involved:
-![partition-decrease](images/partition-decrease.png)
+![partition-decrease](images/alexxu/partition-decrease.png)
  * Once a partition is decommissioned, new messages are only received by remaining partitions
  * The decommissioned partition isn't removed immediately as messages can still be consumed from it
  * Once a pre-configured retention period passes, do we truncate the data and storage space is freed up
@@ -374,13 +374,13 @@ Let's discuss different delivery semantics.
 
 ### At-most once
 With this guarantee, messages are delivered not more than once and could not be delivered at all.
-![at-most-once](images/at-most-once.png)
+![at-most-once](images/alexxu/at-most-once.png)
  * Producer sends a message asynchronously to a topic. If message delivery fails, there is no retry.
  * Consumer fetches message and immediately commits offset. If consumer crashes before processing the message, the message will not be processed.
 
 ### At-least once
 A message can be sent more than once and no message should be left unprocessed.
-![at-least-once](images/at-least-once.png)
+![at-least-once](images/alexxu/at-least-once.png)
  * Producer sends message with `ack=1` or `ack=all`. If there is any issue, it will keep retrying.
  * Consumer fetches the message and consumes the offset only after it's done processing it.
  * It is possible for a message to be delivered more than once if eg consumer crashes before committing offset but after processing it.
@@ -388,7 +388,7 @@ A message can be sent more than once and no message should be left unprocessed.
 
 ### Exactly once
 Extremely costly to implement for the system, albeit it's the friendliest guarantee to users:
-![exactly-once](images/exactly-once.png)
+![exactly-once](images/alexxu/exactly-once.png)
 
 ## Advanced features
 Let's discuss some advanced features, we might discuss in the interview.
@@ -405,21 +405,21 @@ We can resolve this using message filtering.
  * Alternatively, messages can have tags attached to them and consumers can specify which tags they're subscribed to
  * Filtering could also be done via the message payloads but that can be challenging and unsafe for encrypted/serialized messages
  * For more complex mathematical formulaes, the broker could implement a grammar parser or script executor, but that can be heavyweight for the message queue
-![message-filtering](images/message-filtering.png)
+![message-filtering](images/alexxu/message-filtering.png)
 
 ### Delayed messages & scheduled messages
 For some use-cases, we might want to delay or schedule message delivery. 
 For example, we might submit a payment verification check for 30m from now, which triggers the consumer to see if a payment was successful.
 
 This can be achieved by sending messages to temporary storage in the broker and moving the message to the partition at the right time:
-![delayed-message-implementation](images/delayed-message-implementation.png)
+![delayed-message-implementation](images/alexxu/delayed-message-implementation.png)
  * The temporary storage can be one or more special message topics
  * The timing function can be achieved using dedicated delay queues or a [hierarchical time wheel](http://www.cs.columbia.edu/~nahum/w6998/papers/sosp87-timing-wheels.pdf)
 
 ## Other Designs
 
 ### By Jordan
-![JordanDistritbuedMessageQueue](images/DistributeMessageQueueJordan.png)
+![JordanDistritbuedMessageQueue](images/alexxu/DistributeMessageQueueJordan.png)
 
 # Step 4 - Wrap up
 Additional talking points:
