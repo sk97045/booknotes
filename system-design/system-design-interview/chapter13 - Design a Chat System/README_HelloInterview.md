@@ -16,21 +16,24 @@
 6. Inbox (Undelivered Messages): UserId, MessageId
 
 ## 2. API Design
-
+<br><br><br><br><br><br><br><br><br><br><br><br><br><br><br>
 ![data-tables](images/hello-interview/2.png)
 
 ## High-Level Design (~10–15 min)
 
 ### Arpit 
-![data-tables](images/arpit/1.png)
+<br><br><br><br><br><br><br><br><br><br><br><br><br><br><br>
+![data-tables](images/arpit/1.png)<br><br><br><br><br><br><br><br><br><br><br><br><br><br><br>
 ![data-tables](images/arpit/2.png)
 
 ### ShowOffer
+<br><br><br><br><br><br><br><br><br><br><br><br><br><br><br>
 ![data-tables](images/show-offer/1.png)
-![data-tables](images/show-offer/2.png)
-![data-tables](images/show-offer/4.png)
+<br><br><br><br><br><br><br><br><br><br><br><br><br><br><br>
+![data-tables](images/show-offer/2.png)<br><br><br><br><br><br><br><br><br><br><br><br><br><br><br>
+![data-tables](images/show-offer/4.png)<br><br><br><br><br><br><br><br><br><br><br><br><br><br><br>
 ![data-tables](images/show-offer/3.png)
-
+<br><br><br><br><br><br><br><br><br><br><br><br><br><br><br>
 
 ![data-tables](images/hello-interview/3.png)
 ---
