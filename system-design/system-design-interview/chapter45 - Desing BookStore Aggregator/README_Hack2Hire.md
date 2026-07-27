@@ -242,6 +242,14 @@ Two external calls, two external systems, each can fail independently. **Four ce
 *This is a **saga with compensating transactions**, not a distributed 2PC — DDIA Ch. 9 notes 2PC needs a coordinator with authority over all participants, which we don't have over external stores and gateways. Compensation (cancel/refund) is the only viable atomicity primitive across systems we don't control.*
 
 ---
+## Scenarios
+
+| Aspect | Strategy | Reason |
+| --- | --- | --- |
+| Retry Latency | Immediate + 5-min recon | Balances user experience (fast failover) with crash recovery (durability). |
+| First Call Retry | Yes, Idempotent | Prevents false negatives from transient network issues. |
+| Recon Timing | > 5 mins old | Allows time for slow downstream responses to arrive naturally. |
+| Final Failure | Cancel Order + Manual Flag | Ensures no orphaned charges; human intervention resolves edge cases. |
 
 ## Other Considerations
 
