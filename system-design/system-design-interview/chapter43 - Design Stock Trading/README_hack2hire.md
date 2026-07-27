@@ -312,11 +312,11 @@ Two things to name here:
 - **The hold releases at the *execution* price, not the limit price.** The user paid $150.10, not $150.25.
 - **The $21 residual** is price improvement — the difference between the worst case we reserved and what actually happened. It's released **only at terminal state**, because until the order is done, the unfilled quantity still needs its reservation. Releasing residual early would let the user spend money that a subsequent fill still needs.
 
+![data-tables](images/hack2hire/5.png)
+
 ---
 
 ### Order lifecycle state machine
-
-![data-tables](images/hack2hire/5.png)
 
 Terminal states are **absorbing**. Every transition is guarded in SQL by both the legal predecessor set *and* the version. A late-arriving duplicate transition becomes a **0-row UPDATE** — a silent, safe no-op. The FSM isn't documentation; it's a `WHERE` clause.
 
