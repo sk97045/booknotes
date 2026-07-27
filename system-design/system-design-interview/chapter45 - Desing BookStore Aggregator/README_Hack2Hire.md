@@ -122,14 +122,14 @@ You do **not** call all 500 stores on every request. Cached prices serve most re
 
 ### Flow 1 — cache hit (the fast path, ~100s of ms)
 
-<br><br><br><br><br><br>
+<br><br><br><br><br><br><br><br><br><br><br><br>
 ![data-tables](images/hack2hire/5.png)
 
 Bid service checks Redis for fresh entries for the ISBN. If enough stores are represented, **skip the fan-out entirely**, pick the lowest cached price, compare to bid. For a price-only answer, moderate staleness is fine. *For a purchase, the winning price is re-validated at the store before committing — a stale cache never causes a wrong purchase.*
 
 ### Flow 2 — cache miss (fan-out)
 
-<br><br><br><br><br><br>
+<br><br><br><br><br><br><br><br><br><br><br><br>
 ![data-tables](images/hack2hire/6.png)
 
 Bid service triggers the aggregator, which launches parallel HTTP calls via a **bounded in-process thread pool** and sets a **global timeout fence** (e.g. 3s inside the 5s budget). It collects whatever arrives before the fence closes, writes fresh prices back to Redis, then applies the same lowest-price logic.
