@@ -127,7 +127,7 @@ POST                   /v1/devices        // register push token (hint only)
 ## 4. High-Level Design (~10–15 min)
 
 ### The naive version, and why it breaks
-
+<br><br><br><br><br><br><br><br>
 ![data-tables](images/hack2hire/2.png)
 
 Simplest thing that closes the loop: client watches the filesystem, PUTs the whole file to blob storage, writes a version row to a metadata service; other clients poll for newer versions and download. That works — and then dies three ways:
@@ -139,13 +139,13 @@ Simplest thing that closes the loop: client watches the filesystem, PUTs the who
 The real design fixes each: **chunked content addressing** (cost ∝ change), **multipart sessions** (resumable), **optimistic base_revision + deterministic siblings** (no silent loss).
 
 ### Architecture
-
+<br><br><br><br><br><br><br><br><br><br><br>
 ![data-tables](images/hack2hire/3.png)
 
 **Reading the diagram:** two planes, one narrow handshake. The metadata plane owns *truth* — tree structure, revision order, conflict outcomes, dedup refcounts, sync order. The blob plane owns *bytes* — immutable, content-addressed, dumb. The blob tier never decides folder placement or who won a conflict. Bulk part uploads bypass the gateway to the Upload Service directly (they're throughput-bound; there's no reason to burn gateway CPU proxying 500 MB).
 
 ### Flow 1 — Upload + commit
-
+<br><br><br><br><br><br><br><br><br><br><br>
 ![data-tables](images/hack2hire/4.png)
 
 Client creates node → opens session → PUTs parts (parallel, each identified by `part_index`, each returning a `content_hash`) → calls `:commit` with `base_revision`. Server validates part completeness, binds the manifest, inserts `file_revisions`, bumps refcounts for *newly referenced* hashes, appends `sync_events` — **all in one transaction** (*DDIA Ch. 7*). Parts that never reach commit are session-scoped garbage.
