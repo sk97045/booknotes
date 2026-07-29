@@ -32,7 +32,7 @@ Before diving into designing the system, we should ask the interviewer questions
 
 Let's estimate the QPS. If we assume that there are three steps to reach the reservation page and there is a 10% conversion rate per page,
 we can estimate that if there are 3 reservations, then there must be 30 views of reservation page and 300 views of hotel room detail page.
-![qps-estimation](images/qps-estimation.png)
+![qps-estimation](images/alexxu/qps-estimation.png)
 
 # Step 2 - Propose High-Level Design and Get Buy-In
 We'll explore - API Design, Data model, high-level design.
@@ -92,10 +92,10 @@ Given this knowledge, we'll choose a relational database because:
  * Relational DBs can easily model the data as the structure is very clear.
 
 Here is our schema design:
-![schema-design](images/schema-design.png)
+![schema-design](images/alexxu/schema-design.png)
 
 Most fields are self-explanatory. Only field worth mentioning is the `status` field which represents the state machine of a given room:
-![status-state-machine](images/status-state-machine.png)
+![status-state-machine](images/alexxu/status-state-machine.png)
 
 This data model works well for a system like Airbnb, but not for hotels where users don't reserve a particular room but a room type.
 They reserve a type of room and a room number is chosen at the point of reservation.
@@ -104,7 +104,7 @@ This shortcoming will be addressed in the [Improved Data Model](#improved-data-m
 
 ## High-level Design
 We've chosen a microservice architecture for this design. It has gained great popularity in recent years:
-![high-level-design](images/high-level-design.png)
+![high-level-design](images/alexxu/high-level-design.png)
  * Users book a hotel room on their phone or computer
  * Admin perform administrative functions such as refunding/cancelling a payment, etc
  * CDN caches static resources such as JS bundles, images, videos, etc
@@ -142,7 +142,7 @@ POST /v1/reservations
 ```
 
 Here's the updated schema:
-![updated-schema](images/updated-schema.png)
+![updated-schema](images/alexxu/updated-schema.png)
  * room - contains information about a room
  * room_type_rate - contains information about prices for a given room type
  * reservation - records guest reservation data
@@ -205,22 +205,22 @@ There are two issues to address:
  * Multiple users try to book a room at the same time
 
 Here's a visualization of the first problem:
-![double-booking-single-user](images/double-booking-single-user.png)
+![double-booking-single-user](images/alexxu/double-booking-single-user.png)
 
 There are two approaches to solving this problem:
  * Client-side handling - front-end can disable the book button once clicked. If a user disabled javascript, however, they won't see the button becoming grayed out.
  * Idemptent API - Add an idempotency key to the API, which enables a user to execute an action once, regardless of how many times the endpoint is invoked:
-![idempotency](images/idempotency.png)
+![idempotency](images/alexxu/idempotency.png)
 
 Here's how this flow works:
  * A reservation order is generated once you're in the process of filling in your details and making a booking. The reservation order is generated using a globally unique identifier.
  * Submit reservation 1 using the `reservation_id` generated in the previous step.
  * If "complete booking" is clicked a second time, the same `reservation_id` is sent and the backend detects that this is a duplicate reservation.
  * The duplication is avoided by making the `reservation_id` column have a unique constraint, preventing multiple records with that id being stored in the DB.
-![unique-constraint-violation](images/unique-constraint-violation.png)
+![unique-constraint-violation](images/alexxu/unique-constraint-violation.png)
 
 What if there are multiple users making the same reservation?
-![double-booking-multiple-users](images/double-booking-multiple-users.png)
+![double-booking-multiple-users](images/alexxu/double-booking-multiple-users.png)
  * Let's assume the transaction isolation level is not serializable
  * User 1 and 2 attempt to book the same room at the same time.
  * Transaction 1 checks if there are enough rooms - there are
@@ -260,7 +260,7 @@ Commit
 Pessimistic locking prevents simultaneous updates by putting a lock on a record while it's being updated.
 
 This can be done in MySQL by using the `SELECT... FOR UPDATE` query, which locks the rows selected by the query until the transaction is committed.
-![pessimistic-locking](images/pessimistic-locking.png)
+![pessimistic-locking](images/alexxu/pessimistic-locking.png)
 
 Pros:
  * Prevents applications from updating data that is being changed
@@ -277,7 +277,7 @@ The author doesn't recommend this approach due to its scalability issues.
 Optimistic locking allows multiple users to attempt to update a record at the same time.
 
 There are two common ways to implement it - version numbers and timestamps. Version numbers are recommended as server clocks can be inaccurate.
-![optimistic-locking](images/optimistic-locking.png)
+![optimistic-locking](images/alexxu/optimistic-locking.png)
  * A new `version` column is added to the database table
  * Before a user modifies a database row, the version number is read
  * When the user updates the row, the version number is increased by 1 and written back to the database
@@ -301,7 +301,7 @@ This approach is very similar to optimistic locking, but the guardrails are impl
 ```
 CONSTRAINT `check_room_count` CHECK((`total_inventory - total_reserved` >= 0))
 ```
-![database-constraint](images/database-constraint.png)
+![database-constraint](images/alexxu/database-constraint.png)
 
 Pros:
  * Easy to implement
@@ -328,10 +328,10 @@ One way to scale it is by implementing database sharding - we can split the data
 
 We can shard based on `hotel_id` as all queries filter based on it. 
 Assuming, QPS is 30,000, after sharding the database in 16 shards, each shard handles 1875 QPS, which is within a single MySQL cluster's load capacity.
-![database-sharding](images/database-sharding.png)
+![database-sharding](images/alexxu/database-sharding.png)
 
 We can also utilize caching for room inventory and reservations via Redis. We can set TTL so that old data can expire for days which are past.
-![inventory-cache](images/inventory-cache.png)
+![inventory-cache](images/alexxu/inventory-cache.png)
 
 The way we store an inventory is based on the `hotel_id`, `room_type_id` and `date`:
 ```
@@ -364,13 +364,13 @@ but the reservation and inventory APIs are handled by the same servicefor the re
 This is done because we want to leverage the relational database's ACID guarantees to ensure consistency.
 
 However, the interviewer might challenge this approach as it's not a pure microservice architecture, where each service has a dedicated database:
-![microservices-vs-monolith](images/microservices-vs-monolith.png)
+![microservices-vs-monolith](images/alexxu/microservices-vs-monolith.png)
 
 This can lead to consistency issues. In a monolithic server, we can leverage a relational DBs transaction capabilities to implement atomic operations:
-![atomicity-monolith](images/atomicity-monolith.png)
+![atomicity-monolith](images/alexxu/atomicity-monolith.png)
 
 It's more challenging, however, to guarantee this atomicity when the operation spans across multiple services:
-![microservice-non-atomic-operation](images/microservice-non-atomic-operation.png)
+![microservice-non-atomic-operation](images/alexxu/microservice-non-atomic-operation.png)
 
 There are some well-known techniques to handle these data inconsistencies:
  * Two-phase commit - a database protocol which guarantees atomic transaction commit across multiple nodes. 
