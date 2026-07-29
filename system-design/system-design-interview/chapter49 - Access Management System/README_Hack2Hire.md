@@ -168,33 +168,7 @@ The minimum workable system: a stateless check service that runs the UNION query
 
 ### The architecture
 
-```
-                          POST /v1/authorize
-   ┌──────────┐                  │
-   │Downstream│──────────────────┤
-   │ services │                  ▼
-   └──────────┘          ┌───────────────┐   SISMEMBER (hit)    ╔═══════════╗
-                         │  IAM CHECK    │═════════════════════▶║   REDIS   ║
-                         │  service      │◀════════════════════ ║  perm:{u} ║
-                         │  (stateless)  │   set (miss→backfill) ║  as SET   ║
-                         └───────┬───────┘                       ╚═══════════╝
-                                 │ cache miss / Redis down            ▲
-                                 │  fallback: UNION query             │ DELETE perm:{u}
-                                 ▼                                    │  (evict)
-                         ╔═══════════════╗                    ┌───────┴────────┐
-                         ║  POSTGRESQL   ║                    │  INVALIDATION  │
-                         ║  (authority:  ║◀───resolve         │    WORKER      │
-   ┌──────────┐          ║  RBAC graph + ║    affected users  └───────┬────────┘
-   │  Admins  │          ║  audit_log)   ║                            │ consume
-   └────┬─────┘          ╚═══════▲═══════╝                    ┌───────┴────────┐
-        │ POST /v1/roles/../perms │  write in txn             │  KAFKA / CDC   │
-        ▼                 ┌───────┴───────┐   emit change     │ (change events)│
-   ┌───────────────┐      │  IAM MGMT     │──────────────────▶└────────────────┘
-   │  mgmt CRUD    │─────▶│  service      │
-   └───────────────┘      └───────────────┘
-
-   ═══ correctness-critical (solid)     ─── async / performance (helper)
-```
+![data-tables](images/hack2hire/2.png)
 
 **Five components:**
 
