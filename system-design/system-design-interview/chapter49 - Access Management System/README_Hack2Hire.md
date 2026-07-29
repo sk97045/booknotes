@@ -70,6 +70,9 @@ The system has **two surfaces with fundamentally different profiles**, and the e
 
 Four junction tables encode the many-to-many edges: `user_groups`, `group_roles`, `role_permissions`, and `user_roles` (the direct shortcut).
 
+---
+
+## 3. Data Model
 
 **The authority boundary is the most important line in the design:** *only committed rows in Postgres are authoritative.* The materialized sets in Redis are **derived data, rebuildable from Postgres at any time.** If Redis is lost, the correct state is whatever Postgres says.
 
@@ -167,6 +170,34 @@ The minimum workable system: a stateless check service that runs the UNION query
 3. Hierarchical resources (folder grants all files) make the join tree **unbounded** → need an explicit bounding strategy.
 
 ### The architecture
+
+```
+                          POST /v1/authorize
+   ┌──────────┐                  │
+   │Downstream│──────────────────┤
+   │ services │                  ▼
+   └──────────┘          ┌───────────────┐   SISMEMBER (hit)    ╔═══════════╗
+                         │  IAM CHECK    │═════════════════════▶║   REDIS   ║
+                         │  service      │◀════════════════════ ║  perm:{u} ║
+                         │  (stateless)  │   set (miss→backfill) ║  as SET   ║
+                         └───────┬───────┘                       ╚═══════════╝
+                                 │ cache miss / Redis down            ▲
+                                 │  fallback: UNION query             │ DELETE perm:{u}
+                                 ▼                                    │  (evict)
+                         ╔═══════════════╗                    ┌───────┴────────┐
+                         ║  POSTGRESQL   ║                    │  INVALIDATION  │
+                         ║  (authority:  ║◀───resolve         │    WORKER      │
+   ┌──────────┐          ║  RBAC graph + ║    affected users  └───────┬────────┘
+   │  Admins  │          ║  audit_log)   ║                            │ consume
+   └────┬─────┘          ╚═══════▲═══════╝                    ┌───────┴────────┐
+        │ POST /v1/roles/../perms │  write in txn             │  KAFKA / CDC   │
+        ▼                 ┌───────┴───────┐   emit change     │ (change events)│
+   ┌───────────────┐      │  IAM MGMT     │──────────────────▶└────────────────┘
+   │  mgmt CRUD    │─────▶│  service      │
+   └───────────────┘      └───────────────┘
+
+   ═══ correctness-critical (solid)     ─── async / performance (helper)
+```
 
 ![data-tables](images/hack2hire/2.png)
 
