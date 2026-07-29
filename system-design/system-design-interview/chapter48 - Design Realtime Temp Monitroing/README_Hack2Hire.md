@@ -52,7 +52,32 @@ That single figure is why **pre-computed multi-resolution rollups are mandatory,
 
 ---
 
-## 3. API / System Interface
+## 3. Data Model
+
+```sql
+-- Static registry (infrequent writes): maps device → geography
+sensors(sensor_id PK, zipcode, lat, lng, status, last_seen)
+
+-- Write-hot hypertable, time-partitioned in ~1-day chunks
+sensor_readings(sensor_id, timestamp, temperature, received_at,
+                UNIQUE(sensor_id, timestamp))   -- dedup primitive
+
+-- Continuous aggregates (materialized, incrementally refreshed)
+agg_hourly (zipcode, bucket, min_temp, max_temp, avg_temp)
+agg_daily  (zipcode, bucket, min_temp, max_temp, avg_temp)
+agg_monthly(zipcode, bucket, min_temp, max_temp, avg_temp)
+```
+
+**Two invariants the schema protects:**
+
+1. **No duplicate readings.** `UNIQUE(sensor_id, timestamp)` makes retried POSTs and consumer replays idempotent — they can't double-count in aggregations. This is the reliable idempotency primitive; the write path leans on the constraint, not on client-generated keys. *(DDIA Ch. 12 — idempotence as the foundation of exactly-once effects over an at-least-once transport.)*
+2. **Rollup correctness.** Continuous aggregates must reflect *all* raw readings in their materialization window — including a late arrival that lands after the hourly boundary passed. The refresh pass must sweep back far enough to catch it.
+
+**Indexing/partitioning.** Raw hypertable partitioned by time (1-day chunks) → dropping expired data is a **metadata operation**, not a 8.6B-row delete. Composite `(sensor_id, timestamp)` index inside each chunk serves dedup on ingest. Aggregation tables indexed by `(zipcode, bucket)` for the dashboard path.
+
+---
+
+## 4. API / System Interface
 
 The contract splits cleanly: **sensor side is write-only fire-and-forget; dashboard side is read-only served entirely from derived data.**
 
@@ -76,7 +101,7 @@ SSE  /v1/tiles/updates             → tile-invalidation stream (server → brow
 
 ---
 
-## 4. High-Level Design
+## 5. High-Level Design
 
 ### Start with the naive version (and watch it break)
 
@@ -223,31 +248,6 @@ Reading left→right traces the data lifecycle. Three flows:
 **Why it holds together:** each path solves a different problem and scales independently — ingest absorbs bursts without touching reads; aggregation compresses 8.6B rows → a few thousand; serving turns "query 1M points" into "fetch one cached tile." A slowdown in one path does not cascade.
 
 **Storage choice — TimescaleDB over InfluxDB.** The queries are naturally SQL: `GROUP BY zipcode, time_bucket(...)`. Hypertables give automatic time-partitioning (chunk management) so 100K inserts/sec needs no manual sharding, and **continuous aggregates put incremental rollups inside the DB**. InfluxDB wins only if queries were pure time-series without geographic grouping — but zipcode aggregation needs joins/GROUP-BY semantics that are cleaner in SQL than InfluxQL. **Kafka over Kinesis** unless the shop is AWS-deep — the partition/consumer-group model is the cleaner default for this pipeline shape.
-
----
-
-## 5. Data Model
-
-```sql
--- Static registry (infrequent writes): maps device → geography
-sensors(sensor_id PK, zipcode, lat, lng, status, last_seen)
-
--- Write-hot hypertable, time-partitioned in ~1-day chunks
-sensor_readings(sensor_id, timestamp, temperature, received_at,
-                UNIQUE(sensor_id, timestamp))   -- dedup primitive
-
--- Continuous aggregates (materialized, incrementally refreshed)
-agg_hourly (zipcode, bucket, min_temp, max_temp, avg_temp)
-agg_daily  (zipcode, bucket, min_temp, max_temp, avg_temp)
-agg_monthly(zipcode, bucket, min_temp, max_temp, avg_temp)
-```
-
-**Two invariants the schema protects:**
-
-1. **No duplicate readings.** `UNIQUE(sensor_id, timestamp)` makes retried POSTs and consumer replays idempotent — they can't double-count in aggregations. This is the reliable idempotency primitive; the write path leans on the constraint, not on client-generated keys. *(DDIA Ch. 12 — idempotence as the foundation of exactly-once effects over an at-least-once transport.)*
-2. **Rollup correctness.** Continuous aggregates must reflect *all* raw readings in their materialization window — including a late arrival that lands after the hourly boundary passed. The refresh pass must sweep back far enough to catch it.
-
-**Indexing/partitioning.** Raw hypertable partitioned by time (1-day chunks) → dropping expired data is a **metadata operation**, not a 8.6B-row delete. Composite `(sensor_id, timestamp)` index inside each chunk serves dedup on ingest. Aggregation tables indexed by `(zipcode, bucket)` for the dashboard path.
 
 ---
 
