@@ -1,0 +1,327 @@
+# Design a Distributed Key-Value Store
+
+> **Difficulty:** Hard · **Asked by:** Snowflake, Google, Amazon (+7) · **Stage:** Onsite
+>
+> A key-value store maps opaque keys to opaque values behind a two-method API — `put(key, value)` and `get(key)`. The difficulty is not the interface; it's everything the interface hides: partitioning 100 TB across 75+ nodes, replicating every key for durability, and exposing a single tunable dial that trades consistency against latency. This is the canonical Dynamo/Cassandra design.
+
+---
+
+## 1. Requirements
+
+### Clarifying questions (the dialogue that scopes the problem)
+
+| You ask | Interviewer says | What it locks in |
+|---|---|---|
+| What's the API surface — do we need range scans, secondary indexes, or multi-key transactions? | Single-key only. `put`/`get` with opaque values. | Local storage engines can optimize for raw throughput; no distributed multi-key coordination. |
+| During a partition, do we stay available and serve stale reads, or reject requests that can't reach a full quorum? | **Availability first.** Stale reads during a partition are acceptable. | AP by default → we need a *tunable* replication model plus conflict detection. |
+| Can an acknowledged write be lost if the accepting node crashes immediately? | **No.** Once we ack, the write survives a single-node crash. | Ack must be tied to disk persistence (WAL), not just an in-memory buffer. |
+| Read-to-write ratio and value size? | Reads ≈ 4× writes. Values < 10 KB. | Read-dominant, small payloads → serving reads from memory is essential. |
+| Total data volume and cluster size? | ~100 TB today → petabytes, across ~75 nodes. | Horizontal sharding that adds/removes nodes without a cluster-wide reshuffle. |
+| Two clients write the same key on different replicas, then those replicas sync — silently pick a winner, or detect the conflict? | LWW is an acceptable *default*, but the system must **detect** writes it can't causally order. | We must track concurrency explicitly (vector clocks) even if we resolve via LWW. |
+
+### Functional requirements (top priority first)
+
+1. **`put(key, value)` and `get(key)`** as the sole client-facing operations.
+2. **Partition** data across nodes via consistent hashing with virtual nodes.
+3. **Replicate** each key to **N** nodes for fault tolerance.
+4. **Tunable consistency** via quorum parameters **(N, W, R)** per request.
+5. **Self-healing:** detect node failures and rebalance on join/leave.
+
+### Non-functional requirements (quantified)
+
+- **Availability:** 99.99% uptime; keep serving through node failures and network partitions (**AP default, tunable CP via quorum**).
+- **Latency:** p99 single-key read/write **< 10 ms**.
+- **Scale:** horizontal to **petabytes across hundreds of nodes**, with automatic rebalancing.
+- **Durability:** **no acknowledged write is lost** after a single-node crash.
+
+### Capacity estimation (only what changes a decision)
+
+The numbers that actually drive design choices:
+
+| Parameter | Value |
+|---|---|
+| Value size | ≤ 10 KB |
+| Total data | ~100 TB (→ petabytes) |
+| Replication factor (N) | 3 → **~300 TB** stored |
+| Usable/node | ~4 TB → **~75 nodes** |
+| Write throughput | ~50K writes/s |
+| Read throughput | ~200K reads/s |
+| Quorum default | **N=3, W=2, R=2** |
+
+The one number that matters: with **N=3, W=2, R=2**, we get `W + R = 4 > 3 = N`, so the write and read sets always overlap (strong reads) *while still tolerating one unavailable replica on either path.* Everything downstream hangs off this inequality.
+
+---
+
+## 2. Core Entities
+
+- **Key** — opaque byte string (≤ 256 B), hashed to a ring position.
+- **Value** — opaque byte payload (≤ 10 KB), carrying a **version (vector clock)**.
+- **Node** — a physical server; owns many **virtual nodes** on the ring, runs a local LSM engine.
+- **Partition / Ring Range** — a hash range on the consistent-hash ring, owned by the node clockwise-nearest to it.
+- **Replica Set** — the N distinct physical nodes walking clockwise from a key's position.
+
+---
+
+## 3. API / System Interface
+
+A deliberately minimal REST contract. The interesting design is *behind* it.
+
+**Store a value**
+
+```
+PUT /kv/{key}
+  body: <value bytes>                       # application/octet-stream
+  headers:
+    X-Consistency-Level: ONE | QUORUM | ALL # optional, default QUORUM
+→ 200 OK  { "version": "<vector_clock>" }
+```
+
+**Retrieve a value**
+
+```
+GET /kv/{key}
+→ 200 OK  { "value": "<bytes>", "version": "<vector_clock>" }
+→ 404 Not Found
+```
+
+**Delete** is not special internally — the coordinator writes a **tombstone** that propagates down the same replication path, and compaction reclaims it after a grace period (so a slow replica can't "resurrect" the key during anti-entropy).
+
+| Level | Write | Read | Trade-off |
+|---|---|---|---|
+| ONE | ack after 1 | 1 replica | Fastest, risks stale reads |
+| **QUORUM** | ack after W | R replicas, pick latest | **Strong when W+R>N** |
+| ALL | ack after N | all N | Strongest; any dead replica blocks |
+
+> **Senior framing:** "I'd default both reads and writes to QUORUM and explain the `W + R > N` invariant. It shows the consistency model is understood without over-engineering the API surface." Identity/version comes from the vector clock in the request, which is why writes are idempotent under retry.
+
+---
+
+## 4. High-Level Design
+
+### Start naive, then break it (senior signal)
+
+The simplest KV store is a **single-node in-memory hash map**: fast, but capped at ~64 GB of RAM and loses everything on crash. That failure motivates three evolutions in order — **durability**, then **partitioning**, then **replication** — and each maps to a specific non-functional requirement.
+
+**Step 1 — durability via WAL + LSM.** Append every write to a sequential **Write-Ahead Log** on disk *before* touching memory, so an acknowledged write survives a crash (WAL is replayed on restart). Since RAM has a ceiling, the in-memory map becomes a **Log-Structured Merge-tree**: writes land in the WAL then an in-memory sorted **memtable**; when it fills, it flushes to an immutable sorted **SSTable** on disk. Reads check the memtable, then SSTables (newest-first) using **Bloom filters** to skip files that can't contain the key.
+
+*This is the same engine as RocksDB / LevelDB (DDIA Ch. 3, "SSTables and LSM-Trees").*
+
+### The single-node engine
+
+<svg viewBox="0 0 760 380" xmlns="http://www.w3.org/2000/svg" font-family="'Comic Sans MS','Segoe Print',cursive" font-size="13">
+  <style>
+    .box{fill:#fffef7;stroke:#3b3b3b;stroke-width:2;}
+    .disk{fill:#eef6ff;stroke:#2b4b66;stroke-width:2;}
+    .lbl{fill:#222;}
+    .arr{stroke:#3b3b3b;stroke-width:2;fill:none;marker-end:url(#ah);}
+    .note{fill:#7a5c00;font-size:11px;}
+  </style>
+  <defs><marker id="ah" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#3b3b3b"/></marker></defs>
+  <rect class="box" x="20" y="150" width="90" height="50" rx="6"/>
+  <text class="lbl" x="40" y="180">Client</text>
+  <path class="arr" d="M110,175 L175,175"/>
+  <text class="note" x="115" y="168">put/get</text>
+  <rect class="box" x="180" y="140" width="120" height="70" rx="6"/>
+  <text class="lbl" x="200" y="170">Node</text>
+  <text class="note" x="196" y="190">coordinator +</text>
+  <text class="note" x="196" y="203">LSM engine</text>
+  <!-- write path -->
+  <path class="arr" d="M300,160 L370,120"/>
+  <text class="note" x="305" y="120">1. append</text>
+  <rect class="disk" x="375" y="95" width="110" height="46" rx="6"/>
+  <text class="lbl" x="405" y="123">WAL</text>
+  <text class="note" x="378" y="88">append-only, fsync</text>
+  <path class="arr" d="M300,180 L370,180"/>
+  <text class="note" x="305" y="173">2. insert</text>
+  <rect class="box" x="375" y="160" width="110" height="46" rx="6"/>
+  <text class="lbl" x="388" y="182">Memtable</text>
+  <text class="note" x="380" y="200">sorted (skiplist)</text>
+  <path class="arr" d="M485,183 L560,183"/>
+  <text class="note" x="495" y="176">flush @64MB</text>
+  <rect class="disk" x="565" y="150" width="170" height="120" rx="6"/>
+  <text class="lbl" x="600" y="178">SSTables</text>
+  <text class="note" x="575" y="200">immutable, sorted</text>
+  <text class="note" x="575" y="218">+ Bloom filter each</text>
+  <text class="note" x="575" y="248">reads: newest→oldest,</text>
+  <text class="note" x="575" y="262">Bloom skips misses</text>
+</svg>
+
+*Read path: memtable → Bloom-filtered SSTables newest-first, first match wins. Write path: WAL (durable) → memtable (queryable), p99 dominated by one sequential disk write.*
+
+### Step 2 — partitioning via consistent hashing
+
+75+ nodes means we shard the keyspace. **Consistent hashing** maps both keys and nodes onto a ring; a key is owned by the first node clockwise. Adding/removing a node moves only the adjacent segment — not the whole cluster. Plain hashing skews load, so each physical node claims **~150 virtual nodes**, smoothing distribution and letting bigger machines take proportionally more.
+
+### Step 3 — replication via quorum
+
+Walk clockwise from the key's position and pick the next **N distinct physical nodes**. On write, the coordinator fans to all N and returns after **W** ack; on read, it queries **R** and returns the freshest. `W + R > N` guarantees the read set overlaps the write set — so a read always sees the latest write.
+
+### Full architecture
+
+<svg viewBox="0 0 820 470" xmlns="http://www.w3.org/2000/svg" font-family="'Comic Sans MS','Segoe Print',cursive" font-size="13">
+  <style>
+    .box{fill:#fffef7;stroke:#3b3b3b;stroke-width:2;}
+    .node{fill:#f3fff0;stroke:#2f5d2f;stroke-width:2;}
+    .coord{fill:#fff3f0;stroke:#8a3b2b;stroke-width:2.5;}
+    .lbl{fill:#222;}
+    .arr{stroke:#3b3b3b;stroke-width:2;fill:none;marker-end:url(#ah2);}
+    .gos{stroke:#8a6d3b;stroke-width:1.6;stroke-dasharray:5 4;fill:none;marker-end:url(#ah3);}
+    .note{fill:#7a5c00;font-size:11px;}
+    .rep{stroke:#2f5d2f;stroke-width:2;fill:none;marker-end:url(#ah4);}
+  </style>
+  <defs>
+    <marker id="ah2" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#3b3b3b"/></marker>
+    <marker id="ah3" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#8a6d3b"/></marker>
+    <marker id="ah4" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#2f5d2f"/></marker>
+  </defs>
+  <rect class="box" x="20" y="200" width="90" height="50" rx="6"/>
+  <text class="lbl" x="40" y="230">Client</text>
+  <path class="arr" d="M110,225 L185,225"/>
+  <text class="note" x="115" y="218">PUT/GET (any node)</text>
+  <text class="note" x="115" y="245">caches ring → direct</text>
+  <!-- coordinator -->
+  <rect class="coord" x="190" y="195" width="130" height="70" rx="6"/>
+  <text class="lbl" x="205" y="222">Coordinator</text>
+  <text class="note" x="200" y="242">hash key → owners</text>
+  <text class="note" x="200" y="256">enforce W / R</text>
+  <!-- replicas -->
+  <rect class="node" x="420" y="70" width="150" height="70" rx="6"/>
+  <text class="lbl" x="455" y="98">Replica 1</text>
+  <text class="note" x="432" y="118">LSM: WAL·mem·SST</text>
+  <rect class="node" x="420" y="195" width="150" height="70" rx="6"/>
+  <text class="lbl" x="455" y="223">Replica 2</text>
+  <text class="note" x="432" y="243">LSM: WAL·mem·SST</text>
+  <rect class="node" x="420" y="320" width="150" height="70" rx="6"/>
+  <text class="lbl" x="455" y="348">Replica 3</text>
+  <text class="note" x="432" y="368">LSM: WAL·mem·SST</text>
+  <path class="rep" d="M320,215 L415,110"/>
+  <path class="rep" d="M320,228 L415,228"/>
+  <path class="rep" d="M320,245 L415,350"/>
+  <text class="note" x="330" y="150">fan-out to N=3,</text>
+  <text class="note" x="330" y="164">ack after W=2</text>
+  <!-- gossip -->
+  <path class="gos" d="M570,105 C660,140 660,190 575,220"/>
+  <path class="gos" d="M570,250 C660,285 660,335 575,355"/>
+  <path class="gos" d="M495,140 L495,190"/>
+  <text class="note" x="620" y="235">gossip:</text>
+  <text class="note" x="620" y="250">heartbeats,</text>
+  <text class="note" x="620" y="265">ring topology</text>
+  <text class="note" x="620" y="280">(UDP, off</text>
+  <text class="note" x="620" y="295">critical path)</text>
+</svg>
+
+**Four logical layers:** (1) **Coordinator** — any node the client hits; hashes the key, finds owners, enforces quorum. (2) **Storage engine** — per-node LSM tree. (3) **Replication layer** — fan-out + W/R collection. (4) **Gossip module** — background heartbeats + ring dissemination; drives self-healing, never on the read/write path.
+
+Because every node holds the full ring (via gossip), there is no routing bottleneck — clients can even cache the ring and hit the owner directly, saving a hop.
+
+---
+
+## 5. Deep Dives
+
+### Deep Dive 1 — The LSM tree: compaction & Bloom filters
+
+Left alone, SSTables accumulate forever: read amplification climbs linearly and tombstones never reclaim space. **Compaction** merges SSTables in the background.
+
+- **Size-tiered:** merge ~4 similarly-sized SSTables into a bigger one. Moderate write amp (`O(log N)`), but temporary space amp when old + new coexist. Good for **write-heavy**.
+- **Leveled:** levels L0…Ln, each 10× the last, non-overlapping key ranges within a level. Bounds read amp to the level count (~5 for 100 TB) at the cost of higher write amp. **Cassandra/RocksDB default for read-heavy** — which is our workload (4:1 read:write).
+
+> **Bloom-filter tuning:** 10 bits/key ≈ 1% false positive; 20 bits/key ≈ 0.01% but doubles the filter's memory footprint. Naming this trade-off shows you can reason about memory budgets at scale.
+
+*DDIA Ch. 3 covers the LSM write/read pipeline and compaction strategies in full.*
+
+### Deep Dive 2 — Quorum + vector clocks (the hardest correctness argument)
+
+`N, W, R` are **not three independent knobs** — the single rule `W + R > N` guarantees write/read overlap. With **N=3, W=2, R=2**, a read hits ≥1 replica holding the latest write. If two read replicas disagree, the coordinator returns the newer version and pushes it to the stale one — **read repair**.
+
+Relax to **W=1, R=1** and you gain availability/latency but lose the overlap guarantee — fine for session caches, not for anything requiring freshness. When we relax, **vector clocks** detect the conflicts:
+
+<svg viewBox="0 0 780 320" xmlns="http://www.w3.org/2000/svg" font-family="'Comic Sans MS','Segoe Print',cursive" font-size="13">
+  <style>
+    .life{stroke:#3b3b3b;stroke-width:1.5;stroke-dasharray:4 4;}
+    .head{fill:#fffef7;stroke:#3b3b3b;stroke-width:2;}
+    .msg{stroke:#8a3b2b;stroke-width:2;fill:none;marker-end:url(#ahv);}
+    .lbl{fill:#222;} .note{fill:#7a5c00;font-size:11px;} .clk{fill:#2b4b66;font-size:12px;font-weight:bold;}
+  </style>
+  <defs><marker id="ahv" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#8a3b2b"/></marker></defs>
+  <rect class="head" x="40" y="20" width="90" height="40" rx="6"/><text class="lbl" x="60" y="45">Client A</text>
+  <rect class="head" x="330" y="20" width="110" height="40" rx="6"/><text class="lbl" x="352" y="45">Replica 1</text>
+  <rect class="head" x="560" y="20" width="110" height="40" rx="6"/><text class="lbl" x="582" y="45">Replica 2</text>
+  <line class="life" x1="85" y1="60" x2="85" y2="300"/>
+  <line class="life" x1="385" y1="60" x2="385" y2="300"/>
+  <line class="life" x1="615" y1="60" x2="615" y2="300"/>
+  <path class="msg" d="M85,95 L383,95"/><text class="note" x="150" y="88">put K (concurrent)</text>
+  <text class="clk" x="392" y="99">[R1:1]</text>
+  <path class="msg" d="M85,140 L613,140"/><text class="note" x="150" y="133">put K (concurrent)</text>
+  <text class="clk" x="622" y="144">[R2:1]</text>
+  <path class="msg" d="M383,200 L620,200" stroke-dasharray="0"/>
+  <text class="note" x="410" y="193">read sees both versions</text>
+  <text class="clk" x="200" y="250">[R1:1] ⊄ [R2:1] and vice-versa → CONFLICT detected</text>
+  <text class="note" x="200" y="272">resolve: last-write-wins (default) or return both for app-level merge</text>
+</svg>
+
+Each value carries a vector clock — `(node, counter)` pairs. If neither clock descends from the other, the writes are **concurrent** and the conflict is surfaced (resolved by LWW or returned for merge). A **sloppy quorum** keeps writes flowing during partitions: if a target replica is down, write to a healthy substitute with a **hint** for the intended owner, forwarded on recovery.
+
+> **How I'd say it:** "`W + R > N` gives me consistency. Relax it for availability and I pick up vector clocks for conflict detection. Sloppy quorum is the escape hatch for writes during partition. Those three are one coherent toolkit."
+
+*DDIA Ch. 5 ("Detecting Concurrent Writes," version vectors) and Ch. 9 (quorum consistency, `w + r > n`) are the direct anchors.*
+
+### Deep Dive 3 — Failure detection, hinted handoff, Merkle repair
+
+"What happens when a node goes down?" — the answer must separate **temporary** from **permanent** failure.
+
+<svg viewBox="0 0 800 300" xmlns="http://www.w3.org/2000/svg" font-family="'Comic Sans MS','Segoe Print',cursive" font-size="13">
+  <style>
+    .box{fill:#fffef7;stroke:#3b3b3b;stroke-width:2;}
+    .down{fill:#fdecec;stroke:#a33;stroke-width:2;}
+    .sub{fill:#f3fff0;stroke:#2f5d2f;stroke-width:2;}
+    .arr{stroke:#3b3b3b;stroke-width:2;fill:none;marker-end:url(#ahf);}
+    .lbl{fill:#222;} .note{fill:#7a5c00;font-size:11px;}
+  </style>
+  <defs><marker id="ahf" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#3b3b3b"/></marker></defs>
+  <rect class="box" x="20" y="120" width="110" height="55" rx="6"/><text class="lbl" x="40" y="152">Coordinator</text>
+  <rect class="down" x="300" y="30" width="130" height="55" rx="6"/><text class="lbl" x="325" y="55">Replica 2</text><text class="note" x="325" y="72">DOWN (2s timeout)</text>
+  <rect class="sub" x="300" y="130" width="130" height="55" rx="6"/><text class="lbl" x="322" y="155">Substitute</text><text class="note" x="315" y="172">holds hint for R2</text>
+  <path class="arr" d="M130,140 L296,150"/><text class="note" x="150" y="135">write + hint</text>
+  <path class="arr" d="M430,158 L560,90" stroke-dasharray="4 3"/>
+  <text class="note" x="455" y="120">on recovery:</text><text class="note" x="455" y="134">forward hint</text>
+  <rect class="box" x="560" y="60" width="150" height="60" rx="6"/><text class="lbl" x="580" y="88">R2 recovered</text><text class="note" x="572" y="106">&lt; 3h → hinted handoff</text>
+  <rect class="box" x="560" y="160" width="150" height="80" rx="6"/><text class="lbl" x="580" y="188">Permanent (&gt;3h)</text>
+  <text class="note" x="572" y="208">Merkle tree diff:</text><text class="note" x="572" y="222">sync only divergent</text><text class="note" x="572" y="236">key ranges</text>
+  <path class="arr" d="M430,165 L556,195"/>
+</svg>
+
+- **Detection:** gossip heartbeats to random peers; a missed ~2 s timeout spreads suspicion, and once enough nodes confirm, the node is marked down. Converges in `O(log N)` rounds, no central health-checker SPOF.
+- **Temporary failure → hinted handoff:** coordinator writes to a substitute + hint; on the node's return (re-announced via gossip), hints replay. Cheap fix for the common case (blips, rolling restarts).
+- **Permanent failure (> ~3 h):** discard hints, re-replicate. **Merkle trees** compare hash-tree roots between replicas — matching roots = in sync; differing roots let them walk down to the **divergent ranges only**, cutting sync from `O(total keys)` to `O(divergent + log total)`.
+
+---
+
+## Real-World Anchor
+
+This is essentially **Amazon Dynamo** (the 2007 paper) and its open-source descendants **Cassandra** and **Riak**. Dynamo introduced the exact toolkit here — consistent hashing + virtual nodes, `(N, W, R)` quorums, vector clocks for concurrent-write detection, hinted handoff, and Merkle-tree anti-entropy. **Cassandra** defaults to **leveled compaction** for read-heavy workloads (matching our 4:1 ratio) and swaps vector clocks for last-write-wins-by-timestamp to simplify operations; **DynamoDB** later moved conflict-prone paths toward stronger consistency options. Bytebytego's Dynamo/Cassandra cheat sheet maps one-to-one onto this design.
+
+## DDIA Chapter References
+
+- **Ch. 3** — SSTables, LSM-trees, compaction, Bloom filters (the storage engine).
+- **Ch. 5** — Leaderless replication, read repair, anti-entropy, version vectors / concurrent-write detection.
+- **Ch. 6** — Partitioning by hash of key, rebalancing, request routing.
+- **Ch. 9** — Quorum consistency and the `w + r > n` invariant; limits of quorums under partition.
+
+---
+
+## Other Considerations (raise proactively — senior signal)
+
+- **TTL / expiration:** lazy deletion on the read path (expired key → "not found," no write); space reclaimed during compaction (expired = implicit tombstone). A **grace period** (~10 days) ensures tombstones outlive propagation so slow replicas can't resurrect keys.
+- **Quorum vs. Raft:** our design is **AP** (eventual, tunable, vector clocks, writable under partition — good for carts/sessions). **Raft (etcd, TiKV)** is **CP**: linearizable, no conflict resolution needed, but minority partitions go read-only and the leader is a latency bottleneck — good for lock/config stores.
+- **Cross-datacenter:** 50–200 ms RTT is too high for synchronous cross-region quorums → **async replication** per-DC with vector clocks reconciling cross-region conflicts, or a **home-region-per-key-range** scheme trading write latency for conflict-freedom.
+- **Service discovery:** static **seed list** bootstraps clients (any seed returns the ring); gossip handles all node-to-node membership — no ZooKeeper SPOF.
+
+---
+
+## 🔍 Senior-Signal Questions to Ask in Your Interview
+
+- **"Are we defaulting to LWW or exposing sibling values to the application for merge?"** → *Why it matters: LWW silently drops a concurrent write; surfacing siblings (like Dynamo's shopping cart) preserves them. Knowing when data loss is acceptable is a correctness judgment, not a config toggle.*
+- **"What's the tombstone grace period versus the max hinted-handoff / down-node window?"** → *Why it matters: if a tombstone is compacted before a slow replica sees it, deleted keys resurrect during anti-entropy. This coupling between compaction and repair timing is where real clusters lose data.*
+- **"Is read repair synchronous or background, and does that change our effective R?"** → *Why it matters: background read repair means a QUORUM read can still briefly return stale data to the client even with W+R>N — exposes whether the candidate understands the gap between the invariant and the runtime path.*
+- **"How do we handle a hot key that all traffic hammers on one replica set?"** → *Why it matters: consistent hashing balances keyspace, not access frequency. Virtual nodes don't fix a single hot key — you need request coalescing, client caching, or key-splitting. Tests hot-spot reasoning beyond "just add nodes."*
+- **"During rebalancing when a node joins, do we serve reads from the old or new owner mid-transfer?"** → *Why it matters: bootstrap-then-flip ownership vs. serving during transfer determines whether we briefly violate the quorum guarantee — a subtle availability/consistency trade-off at the operational seam.*
