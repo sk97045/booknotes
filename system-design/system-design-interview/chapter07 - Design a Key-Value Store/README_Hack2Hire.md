@@ -1,6 +1,5 @@
 # Design a Distributed Key-Value Store
 
-> **Difficulty:** Hard · **Asked by:** Snowflake, Google, Amazon (+7) · **Stage:** Onsite
 >
 > A key-value store maps opaque keys to opaque values behind a two-method API — `put(key, value)` and `get(key)`. The difficulty is not the interface; it's everything the interface hides: partitioning 100 TB across 75+ nodes, replicating every key for durability, and exposing a single tunable dial that trades consistency against latency. This is the canonical Dynamo/Cassandra design.
 
@@ -107,44 +106,7 @@ The simplest KV store is a **single-node in-memory hash map**: fast, but capped 
 *This is the same engine as RocksDB / LevelDB (DDIA Ch. 3, "SSTables and LSM-Trees").*
 
 ### The single-node engine
-
-<svg viewBox="0 0 760 380" xmlns="http://www.w3.org/2000/svg" font-family="'Comic Sans MS','Segoe Print',cursive" font-size="13">
-  <style>
-    .box{fill:#fffef7;stroke:#3b3b3b;stroke-width:2;}
-    .disk{fill:#eef6ff;stroke:#2b4b66;stroke-width:2;}
-    .lbl{fill:#222;}
-    .arr{stroke:#3b3b3b;stroke-width:2;fill:none;marker-end:url(#ah);}
-    .note{fill:#7a5c00;font-size:11px;}
-  </style>
-  <defs><marker id="ah" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#3b3b3b"/></marker></defs>
-  <rect class="box" x="20" y="150" width="90" height="50" rx="6"/>
-  <text class="lbl" x="40" y="180">Client</text>
-  <path class="arr" d="M110,175 L175,175"/>
-  <text class="note" x="115" y="168">put/get</text>
-  <rect class="box" x="180" y="140" width="120" height="70" rx="6"/>
-  <text class="lbl" x="200" y="170">Node</text>
-  <text class="note" x="196" y="190">coordinator +</text>
-  <text class="note" x="196" y="203">LSM engine</text>
-  <!-- write path -->
-  <path class="arr" d="M300,160 L370,120"/>
-  <text class="note" x="305" y="120">1. append</text>
-  <rect class="disk" x="375" y="95" width="110" height="46" rx="6"/>
-  <text class="lbl" x="405" y="123">WAL</text>
-  <text class="note" x="378" y="88">append-only, fsync</text>
-  <path class="arr" d="M300,180 L370,180"/>
-  <text class="note" x="305" y="173">2. insert</text>
-  <rect class="box" x="375" y="160" width="110" height="46" rx="6"/>
-  <text class="lbl" x="388" y="182">Memtable</text>
-  <text class="note" x="380" y="200">sorted (skiplist)</text>
-  <path class="arr" d="M485,183 L560,183"/>
-  <text class="note" x="495" y="176">flush @64MB</text>
-  <rect class="disk" x="565" y="150" width="170" height="120" rx="6"/>
-  <text class="lbl" x="600" y="178">SSTables</text>
-  <text class="note" x="575" y="200">immutable, sorted</text>
-  <text class="note" x="575" y="218">+ Bloom filter each</text>
-  <text class="note" x="575" y="248">reads: newest→oldest,</text>
-  <text class="note" x="575" y="262">Bloom skips misses</text>
-</svg>
+![data-tables](images/hack2hire/1.png)
 
 *Read path: memtable → Bloom-filtered SSTables newest-first, first match wins. Write path: WAL (durable) → memtable (queryable), p99 dominated by one sequential disk write.*
 
@@ -152,63 +114,22 @@ The simplest KV store is a **single-node in-memory hash map**: fast, but capped 
 
 75+ nodes means we shard the keyspace. **Consistent hashing** maps both keys and nodes onto a ring; a key is owned by the first node clockwise. Adding/removing a node moves only the adjacent segment — not the whole cluster. Plain hashing skews load, so each physical node claims **~150 virtual nodes**, smoothing distribution and letting bigger machines take proportionally more.
 
+![data-tables](images/hack2hire/2.png)
+
 ### Step 3 — replication via quorum
+
+<br><br><br><br><br><br><br><br><br><br><br><br><br><br><br>
 
 Walk clockwise from the key's position and pick the next **N distinct physical nodes**. On write, the coordinator fans to all N and returns after **W** ack; on read, it queries **R** and returns the freshest. `W + R > N` guarantees the read set overlaps the write set — so a read always sees the latest write.
 
+
+![data-tables](images/hack2hire/3.png)
+![data-tables](images/hack2hire/4.png)
+
 ### Full architecture
 
-<svg viewBox="0 0 820 470" xmlns="http://www.w3.org/2000/svg" font-family="'Comic Sans MS','Segoe Print',cursive" font-size="13">
-  <style>
-    .box{fill:#fffef7;stroke:#3b3b3b;stroke-width:2;}
-    .node{fill:#f3fff0;stroke:#2f5d2f;stroke-width:2;}
-    .coord{fill:#fff3f0;stroke:#8a3b2b;stroke-width:2.5;}
-    .lbl{fill:#222;}
-    .arr{stroke:#3b3b3b;stroke-width:2;fill:none;marker-end:url(#ah2);}
-    .gos{stroke:#8a6d3b;stroke-width:1.6;stroke-dasharray:5 4;fill:none;marker-end:url(#ah3);}
-    .note{fill:#7a5c00;font-size:11px;}
-    .rep{stroke:#2f5d2f;stroke-width:2;fill:none;marker-end:url(#ah4);}
-  </style>
-  <defs>
-    <marker id="ah2" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#3b3b3b"/></marker>
-    <marker id="ah3" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#8a6d3b"/></marker>
-    <marker id="ah4" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#2f5d2f"/></marker>
-  </defs>
-  <rect class="box" x="20" y="200" width="90" height="50" rx="6"/>
-  <text class="lbl" x="40" y="230">Client</text>
-  <path class="arr" d="M110,225 L185,225"/>
-  <text class="note" x="115" y="218">PUT/GET (any node)</text>
-  <text class="note" x="115" y="245">caches ring → direct</text>
-  <!-- coordinator -->
-  <rect class="coord" x="190" y="195" width="130" height="70" rx="6"/>
-  <text class="lbl" x="205" y="222">Coordinator</text>
-  <text class="note" x="200" y="242">hash key → owners</text>
-  <text class="note" x="200" y="256">enforce W / R</text>
-  <!-- replicas -->
-  <rect class="node" x="420" y="70" width="150" height="70" rx="6"/>
-  <text class="lbl" x="455" y="98">Replica 1</text>
-  <text class="note" x="432" y="118">LSM: WAL·mem·SST</text>
-  <rect class="node" x="420" y="195" width="150" height="70" rx="6"/>
-  <text class="lbl" x="455" y="223">Replica 2</text>
-  <text class="note" x="432" y="243">LSM: WAL·mem·SST</text>
-  <rect class="node" x="420" y="320" width="150" height="70" rx="6"/>
-  <text class="lbl" x="455" y="348">Replica 3</text>
-  <text class="note" x="432" y="368">LSM: WAL·mem·SST</text>
-  <path class="rep" d="M320,215 L415,110"/>
-  <path class="rep" d="M320,228 L415,228"/>
-  <path class="rep" d="M320,245 L415,350"/>
-  <text class="note" x="330" y="150">fan-out to N=3,</text>
-  <text class="note" x="330" y="164">ack after W=2</text>
-  <!-- gossip -->
-  <path class="gos" d="M570,105 C660,140 660,190 575,220"/>
-  <path class="gos" d="M570,250 C660,285 660,335 575,355"/>
-  <path class="gos" d="M495,140 L495,190"/>
-  <text class="note" x="620" y="235">gossip:</text>
-  <text class="note" x="620" y="250">heartbeats,</text>
-  <text class="note" x="620" y="265">ring topology</text>
-  <text class="note" x="620" y="280">(UDP, off</text>
-  <text class="note" x="620" y="295">critical path)</text>
-</svg>
+<br><br><br><br><br><br><br><br><br><br><br><br><br><br><br>
+![data-tables](images/hack2hire/5.png)
 
 **Four logical layers:** (1) **Coordinator** — any node the client hits; hashes the key, finds owners, enforces quorum. (2) **Storage engine** — per-node LSM tree. (3) **Replication layer** — fan-out + W/R collection. (4) **Gossip module** — background heartbeats + ring dissemination; drives self-healing, never on the read/write path.
 
