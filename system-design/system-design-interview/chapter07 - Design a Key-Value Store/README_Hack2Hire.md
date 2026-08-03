@@ -141,6 +141,8 @@ Because every node holds the full ring (via gossip), there is no routing bottlen
 
 ### Deep Dive 1 — The LSM tree: compaction & Bloom filters
 
+![data-tables](images/hack2hire/6.png)
+
 Left alone, SSTables accumulate forever: read amplification climbs linearly and tombstones never reclaim space. **Compaction** merges SSTables in the background.
 
 - **Size-tiered:** merge ~4 similarly-sized SSTables into a bigger one. Moderate write amp (`O(log N)`), but temporary space amp when old + new coexist. Good for **write-heavy**.
@@ -156,29 +158,7 @@ Left alone, SSTables accumulate forever: read amplification climbs linearly and 
 
 Relax to **W=1, R=1** and you gain availability/latency but lose the overlap guarantee — fine for session caches, not for anything requiring freshness. When we relax, **vector clocks** detect the conflicts:
 
-<svg viewBox="0 0 780 320" xmlns="http://www.w3.org/2000/svg" font-family="'Comic Sans MS','Segoe Print',cursive" font-size="13">
-  <style>
-    .life{stroke:#3b3b3b;stroke-width:1.5;stroke-dasharray:4 4;}
-    .head{fill:#fffef7;stroke:#3b3b3b;stroke-width:2;}
-    .msg{stroke:#8a3b2b;stroke-width:2;fill:none;marker-end:url(#ahv);}
-    .lbl{fill:#222;} .note{fill:#7a5c00;font-size:11px;} .clk{fill:#2b4b66;font-size:12px;font-weight:bold;}
-  </style>
-  <defs><marker id="ahv" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#8a3b2b"/></marker></defs>
-  <rect class="head" x="40" y="20" width="90" height="40" rx="6"/><text class="lbl" x="60" y="45">Client A</text>
-  <rect class="head" x="330" y="20" width="110" height="40" rx="6"/><text class="lbl" x="352" y="45">Replica 1</text>
-  <rect class="head" x="560" y="20" width="110" height="40" rx="6"/><text class="lbl" x="582" y="45">Replica 2</text>
-  <line class="life" x1="85" y1="60" x2="85" y2="300"/>
-  <line class="life" x1="385" y1="60" x2="385" y2="300"/>
-  <line class="life" x1="615" y1="60" x2="615" y2="300"/>
-  <path class="msg" d="M85,95 L383,95"/><text class="note" x="150" y="88">put K (concurrent)</text>
-  <text class="clk" x="392" y="99">[R1:1]</text>
-  <path class="msg" d="M85,140 L613,140"/><text class="note" x="150" y="133">put K (concurrent)</text>
-  <text class="clk" x="622" y="144">[R2:1]</text>
-  <path class="msg" d="M383,200 L620,200" stroke-dasharray="0"/>
-  <text class="note" x="410" y="193">read sees both versions</text>
-  <text class="clk" x="200" y="250">[R1:1] ⊄ [R2:1] and vice-versa → CONFLICT detected</text>
-  <text class="note" x="200" y="272">resolve: last-write-wins (default) or return both for app-level merge</text>
-</svg>
+![data-tables](images/hack2hire/7.png)
 
 Each value carries a vector clock — `(node, counter)` pairs. If neither clock descends from the other, the writes are **concurrent** and the conflict is surfaced (resolved by LWW or returned for merge). A **sloppy quorum** keeps writes flowing during partitions: if a target replica is down, write to a healthy substitute with a **hint** for the intended owner, forwarded on recovery.
 
