@@ -150,7 +150,6 @@ Left alone, SSTables accumulate forever: read amplification climbs linearly and 
 
 > **Bloom-filter tuning:** 10 bits/key ≈ 1% false positive; 20 bits/key ≈ 0.01% but doubles the filter's memory footprint. Naming this trade-off shows you can reason about memory budgets at scale.
 
-*DDIA Ch. 3 covers the LSM write/read pipeline and compaction strategies in full.*
 
 ### Deep Dive 2 — Quorum + vector clocks (the hardest correctness argument)
 
@@ -170,43 +169,11 @@ Each value carries a vector clock — `(node, counter)` pairs. If neither clock 
 
 "What happens when a node goes down?" — the answer must separate **temporary** from **permanent** failure.
 
-<svg viewBox="0 0 800 300" xmlns="http://www.w3.org/2000/svg" font-family="'Comic Sans MS','Segoe Print',cursive" font-size="13">
-  <style>
-    .box{fill:#fffef7;stroke:#3b3b3b;stroke-width:2;}
-    .down{fill:#fdecec;stroke:#a33;stroke-width:2;}
-    .sub{fill:#f3fff0;stroke:#2f5d2f;stroke-width:2;}
-    .arr{stroke:#3b3b3b;stroke-width:2;fill:none;marker-end:url(#ahf);}
-    .lbl{fill:#222;} .note{fill:#7a5c00;font-size:11px;}
-  </style>
-  <defs><marker id="ahf" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#3b3b3b"/></marker></defs>
-  <rect class="box" x="20" y="120" width="110" height="55" rx="6"/><text class="lbl" x="40" y="152">Coordinator</text>
-  <rect class="down" x="300" y="30" width="130" height="55" rx="6"/><text class="lbl" x="325" y="55">Replica 2</text><text class="note" x="325" y="72">DOWN (2s timeout)</text>
-  <rect class="sub" x="300" y="130" width="130" height="55" rx="6"/><text class="lbl" x="322" y="155">Substitute</text><text class="note" x="315" y="172">holds hint for R2</text>
-  <path class="arr" d="M130,140 L296,150"/><text class="note" x="150" y="135">write + hint</text>
-  <path class="arr" d="M430,158 L560,90" stroke-dasharray="4 3"/>
-  <text class="note" x="455" y="120">on recovery:</text><text class="note" x="455" y="134">forward hint</text>
-  <rect class="box" x="560" y="60" width="150" height="60" rx="6"/><text class="lbl" x="580" y="88">R2 recovered</text><text class="note" x="572" y="106">&lt; 3h → hinted handoff</text>
-  <rect class="box" x="560" y="160" width="150" height="80" rx="6"/><text class="lbl" x="580" y="188">Permanent (&gt;3h)</text>
-  <text class="note" x="572" y="208">Merkle tree diff:</text><text class="note" x="572" y="222">sync only divergent</text><text class="note" x="572" y="236">key ranges</text>
-  <path class="arr" d="M430,165 L556,195"/>
-</svg>
+![data-tables](images/hack2hire/8.png)
 
 - **Detection:** gossip heartbeats to random peers; a missed ~2 s timeout spreads suspicion, and once enough nodes confirm, the node is marked down. Converges in `O(log N)` rounds, no central health-checker SPOF.
 - **Temporary failure → hinted handoff:** coordinator writes to a substitute + hint; on the node's return (re-announced via gossip), hints replay. Cheap fix for the common case (blips, rolling restarts).
 - **Permanent failure (> ~3 h):** discard hints, re-replicate. **Merkle trees** compare hash-tree roots between replicas — matching roots = in sync; differing roots let them walk down to the **divergent ranges only**, cutting sync from `O(total keys)` to `O(divergent + log total)`.
-
----
-
-## Real-World Anchor
-
-This is essentially **Amazon Dynamo** (the 2007 paper) and its open-source descendants **Cassandra** and **Riak**. Dynamo introduced the exact toolkit here — consistent hashing + virtual nodes, `(N, W, R)` quorums, vector clocks for concurrent-write detection, hinted handoff, and Merkle-tree anti-entropy. **Cassandra** defaults to **leveled compaction** for read-heavy workloads (matching our 4:1 ratio) and swaps vector clocks for last-write-wins-by-timestamp to simplify operations; **DynamoDB** later moved conflict-prone paths toward stronger consistency options. Bytebytego's Dynamo/Cassandra cheat sheet maps one-to-one onto this design.
-
-## DDIA Chapter References
-
-- **Ch. 3** — SSTables, LSM-trees, compaction, Bloom filters (the storage engine).
-- **Ch. 5** — Leaderless replication, read repair, anti-entropy, version vectors / concurrent-write detection.
-- **Ch. 6** — Partitioning by hash of key, rebalancing, request routing.
-- **Ch. 9** — Quorum consistency and the `w + r > n` invariant; limits of quorums under partition.
 
 ---
 
@@ -238,6 +205,12 @@ Protocol is chosen by **who's talking to whom and how often** — not one defaul
 - **Gossip → UDP.** Membership/heartbeat/ring topology carry no client data and are loss-tolerant, so periodic UDP (not TCP) — converges in `O(log N)` rounds.
 
 *Real-time transport note (for the streaming edge of adjacent systems):* **SSE** is a plain long-lived HTTP response → multiplexes cleanly over HTTP/2, server→client only, free `EventSource` reconnect. **WebSocket** is an **HTTP/1.1 `Upgrade` → `101 Switching Protocols`** that then *seizes the whole TCP connection* (full-duplex, but one socket per connection, no multiplexing). It's tied to HTTP/1.1 because HTTP/2 removed `Upgrade`; RFC 8441 tunnels a WebSocket inside a single HTTP/2 stream but support is thin. **One-liner:** *REST/HTTP at the edge for reach; binary RPC internally for throughput and typed contracts; TCP underneath everywhere except loss-tolerant gossip on UDP.*
+
+---
+
+## Real-World Anchor
+
+This is essentially **Amazon Dynamo** (the 2007 paper) and its open-source descendants **Cassandra** and **Riak**. Dynamo introduced the exact toolkit here — consistent hashing + virtual nodes, `(N, W, R)` quorums, vector clocks for concurrent-write detection, hinted handoff, and Merkle-tree anti-entropy. **Cassandra** defaults to **leveled compaction** for read-heavy workloads (matching our 4:1 ratio) and swaps vector clocks for last-write-wins-by-timestamp to simplify operations; **DynamoDB** later moved conflict-prone paths toward stronger consistency options. Bytebytego's Dynamo/Cassandra cheat sheet maps one-to-one onto this design.
 
 ---
 
