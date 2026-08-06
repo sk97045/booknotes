@@ -48,6 +48,22 @@ That number rules out "just keep everything hot forever" and forces **time-based
 - **Tenant** — `{ tenant_id, api_key_hash, hot_retention, cold_retention, rate_limit_eps }`. Small, high-integrity, transactional. Lives in Postgres.
 - **Batch** — the SDK's flush unit (~100 entries / ~50 KB). Never persisted as an entity; it's the transport granularity that amortizes network cost.
 
+### Access patterns
+
+These four boundaries have **different durability and access profiles**, which is why no single store fits — the entity map above is really a *placement* decision:
+
+- **Ingest hot path** — authenticate API key, resolve `tenant_id`, publish batch to Kafka. **No Elasticsearch write on this path** — the whole point of the durable log is that ingest doesn't wait on indexing.
+- **Search** — query Elasticsearch filtered by `tenant_id` + time range + optional severity, service, user, keyword.
+- **Single log lookup** — fetch one document by `_id` from Elasticsearch (the detail view behind a clicked search result).
+- **Retention cleanup** — list Elasticsearch indexes older than the tenant's hot window, snapshot to S3, then delete the index.
+- **Tenant management** — CRUD on the `tenants` table in PostgreSQL for admin operations.
+
+So each entity lands where its access pattern demands: **Kafka** is the ingest boundary (once acked, indexing is guaranteed); **Elasticsearch** is the queryable truth for the hot window; **S3** is the cold truth after hot retention expires; **Postgres** holds the small, high-integrity tenant config that needs transactional CRUD and strong consistency. SDK-side buffered logs are ephemeral and lossy by design — they live in host memory and are *not* part of the durable boundary.
+
+### Storage tradeoffs — Elasticsearch vs. ClickHouse
+
+**Elasticsearch is the right hot-search store** because it combines **inverted indexes** for keyword search with **time-based index rotation** that naturally matches log retention (retention becomes an index drop, not a scan). The alternative is **ClickHouse**, which offers better compression and aggregate-query performance but weaker ad-hoc full-text search. For a **Datadog-like debugging experience** — operators searching by arbitrary fields and keywords — Elasticsearch fits better. **ClickHouse would win if** the workload were primarily dashboard analytics over log counts and latency percentiles rather than interactive debugging. *(This is the same fork drawn out in Deep Dive 2's ES-vs-ClickHouse reasoning.)*
+
 ---
 
 ## 3. API / System Interface
