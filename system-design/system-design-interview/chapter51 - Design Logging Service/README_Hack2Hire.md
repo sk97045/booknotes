@@ -126,7 +126,7 @@ Follow one entry from caller to search: `log()` → SDK ring buffer (returns ins
 ### Walking the ingest pipeline — four backpressure boundaries
 
 <br><br><br><br><br><br><br><br><br><br><br><br><br><br><br>
-![data-tables](images/hack2hire/1.png)
+![data-tables](images/hack2hire/2.png)
 
 The pipeline has **four boundaries where backpressure is absorbed rather than propagated upstream.** That framing is the whole design: pressure stops at each boundary instead of flowing back toward the caller.
 
