@@ -121,12 +121,11 @@ Those two failures *are* the design spec: (1) demands a **client-side async buff
 
 Follow one entry from caller to search: `log()` → SDK ring buffer (returns instantly) → background thread batches into one HTTP POST → **ingest gateway** (auth, resolve tenant, rate-limit) → **Kafka** (durable handoff, partitioned) → **indexing workers** (Kafka consumer group) → bulk-write to **Elasticsearch** daily indexes → operators hit a **separate query API**. A **retention worker** later snapshots expired hot indexes to **S3** and drops them.
 
-![data-tables](images/hack2hire/1.png)
+<br><br><br><br><br><br><br><br><br><br><br><br><br><br><br>
+![data-tables](images/hack2hire/3.png)
+
 
 ### Walking the ingest pipeline — four backpressure boundaries
-
-<br><br><br><br><br><br><br><br><br><br><br><br><br><br><br>
-![data-tables](images/hack2hire/2.png)
 
 The pipeline has **four boundaries where backpressure is absorbed rather than propagated upstream.** That framing is the whole design: pressure stops at each boundary instead of flowing back toward the caller.
 
@@ -134,6 +133,11 @@ The pipeline has **four boundaries where backpressure is absorbed rather than pr
 2. **Ingest gateway.** Accepts batched HTTP POSTs from many SDK instances, validates the payload, and publishes to Kafka. If Kafka is temporarily slow, the gateway returns **503** and the SDK retries with backoff. It also enforces per-tenant rate limits by checking the tenant's `rate_limit_eps` from **cached** tenant metadata; requests over the limit get **429**.
 3. **Kafka.** The durable event log that decouples ingest from indexing. I'd choose Kafka here because the system needs **partitioned, replayable consumption and consumer-group semantics** for parallel indexing workers. If the stack were deeply AWS-native, **Kinesis** would also be reasonable, but Kafka is the cleaner interview default for this problem shape. Once Kafka acks a batch, the platform **guarantees those entries will eventually be indexed**; partitioning lets multiple workers consume in parallel.
 4. **Workers → Elasticsearch.** Workers consume from Kafka partitions, assemble bulk indexing requests, and write to ES. A failed bulk request is retried; if retries are exhausted, the batch goes to a **dead-letter topic** for later reprocessing. Workers commit their Kafka offset **only after a successful ES write**, so a worker crash **replays from the last committed offset without data loss.**
+
+<br><br><br><br><br><br><br><br><br><br><br><br><br><br><br>
+![data-tables](images/hack2hire/2.png)
+<br><br><br><br><br><br><br><br><br><br><br><br><br><br><br>
+![data-tables](images/hack2hire/4.png)
 
 ### Query path
 
@@ -169,52 +173,8 @@ The load-bearing decision is **what happens when the buffer fills during retries
 
 **How I'd say it in the interview:** *"The SDK is a lossy buffer by design. It guarantees `log()` won't block, not that every log survives. If the backend is down five minutes, we lose some logs — fine. What's not fine is adding latency to production requests because logging is waiting on a network call."*
 
-<svg viewBox="0 0 860 470" xmlns="http://www.w3.org/2000/svg" font-family="'Comic Sans MS','Segoe Print',cursive" font-size="12.5">
-  <style>
-    .life{stroke:#2b2b2b;stroke-width:1.5;stroke-dasharray:4 4;}
-    .head{fill:#fffef7;stroke:#2b2b2b;stroke-width:2;}
-    .msg{stroke:#2b2b2b;stroke-width:2;fill:none;marker-end:url(#s);}
-    .ret{stroke:#8a5a2b;stroke-width:2;fill:none;stroke-dasharray:6 4;marker-end:url(#sd);}
-    .lbl{fill:#1a1a1a;} .note{fill:#7a5230;font-style:italic;font-size:11px;}
-    .title{font-size:15px;font-weight:bold;} .act{fill:#eef6ff;stroke:#2b2b2b;stroke-width:1.5;}
-  </style>
-  <defs>
-    <marker id="s" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#2b2b2b"/></marker>
-    <marker id="sd" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#8a5a2b"/></marker>
-  </defs>
-  <text x="20" y="26" class="title">Ingest sequence — flush, retry, offset commit</text>
+![data-tables](images/hack2hire/7.png)
 
-  <!-- lifelines -->
-  <g>
-    <rect x="40" y="45" width="110" height="34" rx="5" class="head"/><text x="95" y="67" text-anchor="middle" class="lbl">Caller</text>
-    <line x1="95" y1="79" x2="95" y2="440" class="life"/>
-    <rect x="215" y="45" width="120" height="34" rx="5" class="head"/><text x="275" y="67" text-anchor="middle" class="lbl">SDK buffer</text>
-    <line x1="275" y1="79" x2="275" y2="440" class="life"/>
-    <rect x="405" y="45" width="120" height="34" rx="5" class="head"/><text x="465" y="67" text-anchor="middle" class="lbl">Gateway</text>
-    <line x1="465" y1="79" x2="465" y2="440" class="life"/>
-    <rect x="600" y="45" width="90" height="34" rx="5" class="head"/><text x="645" y="67" text-anchor="middle" class="lbl">Kafka</text>
-    <line x1="645" y1="79" x2="645" y2="440" class="life"/>
-    <rect x="740" y="45" width="100" height="34" rx="5" class="head"/><text x="790" y="67" text-anchor="middle" class="lbl">Worker+ES</text>
-    <line x1="790" y1="79" x2="790" y2="440" class="life"/>
-  </g>
-
-  <path d="M95,105 H273" class="msg"/><text x="105" y="99" class="note">log() — appends, returns instantly</text>
-  <path d="M273,107 H97" class="msg"/><text x="150" y="128" class="note">(no wait)</text>
-
-  <path d="M275,165 H463" class="msg"/><text x="285" y="159" class="note">flush: batched POST /ingest</text>
-  <path d="M465,195 H647" class="msg"/><text x="475" y="189" class="note">publish batch</text>
-  <path d="M647,197 H467" class="msg"/><text x="475" y="216" class="note">ack (durable)</text>
-  <path d="M465,240 H277" class="msg"/><text x="290" y="234" class="note">202 Accepted → advance read ptr</text>
-
-  <text x="405" y="272" class="note">— if Kafka slow / 5xx —</text>
-  <path d="M465,295 H277" class="ret"/><text x="285" y="289" class="note">503 → SDK backoff (1s→30s), keep buffering</text>
-  <text x="215" y="322" class="note">buffer full during retry → drop OLDEST</text>
-
-  <path d="M645,360 H792" class="msg"/><text x="655" y="354" class="note">consume partition</text>
-  <path d="M790,392 L740,392" class="msg"/><text x="600" y="386" class="note">bulk index OK</text>
-  <path d="M790,425 H647" class="msg"/><text x="655" y="419" class="note">commit offset AFTER ES success</text>
-  <text x="150" y="425" class="note">crash before commit ⇒ replay (dup ok, idempotent by log_id)</text>
-</svg>
 
 ### Deep Dive 2 — Kafka partition strategy
 
@@ -249,6 +209,112 @@ Daily indexes are **shared across tenants with different retention windows** —
 - **Clock skew:** index by **server-side ingest timestamp** for stable ordering; keep the client timestamp as a separate field. Source clocks drift; results shouldn't.
 - **Adaptive sampling under sustained overload** — applied at the **gateway** (global visibility), not the SDK: keep all ERROR/FATAL, sample WARN 50%, INFO/DEBUG 10%, tag kept entries with the sample rate. Tail-based sampling (keep everything from any errored request) is the fancier version; head-by-severity is usually enough.
 
+### Deep Dive 6 — Why the search store is Elasticsearch (ES vs. ClickHouse vs. Cassandra/Dynamo)
+
+The workload defines the store: **log debugging is unpredictable reads + full-text.** During an incident, operators filter by *arbitrary* field combinations (`service AND user_id AND severity`) and search *inside* the message body (`message CONTAINS "connection refused"`) — none of it known at write time. That single property eliminates two whole families of store.
+
+**Cassandra / DynamoDB — eliminated.** These are *query-first, key-driven* stores: a partition key serves exactly one lookup shape, so you'd model **one denormalized table per query** and write every log N times (500K/s × N). Worse, you can't cover unforeseen field combinations, and there's **no full-text at all**. Secondary indexes don't rescue it: Cassandra's 2i is **node-local**, so a high-cardinality lookup like `user_id` becomes a cluster-wide **scatter-gather** that worsens as you scale; Dynamo's GSI is global but **caps at 20**, is one-shape-per-index, and multiplies write cost. Neither does tokenized `CONTAINS`. Cassandra/Dynamo are right for *known-key, write-heavy* workloads (KV store, ad-budget leasing) — the opposite of logging.
+
+> ⚠️ **Interview trap:** Cassandra is *"wide-column"* in its **data model**, but **row-oriented on disk** — it is **not** columnar. Don't reach for it thinking it gets the columnar aggregation win; it doesn't.
+
+**ClickHouse — the real runner-up, and why it's fast.** ClickHouse doesn't build a per-field index. It's **columnar**, so a filter reads only the query's columns; and it prunes aggressively via **partition-prune → block-prune → column-prune**:
+
+- **Partition:** `PARTITION BY toYYYYMMDD(timestamp)` writes each day to its own on-disk folder → a time-bounded query opens only that day (same retention-as-folder-drop win as ES daily indexes).
+- **Sparse primary index:** rows are sorted by `ORDER BY (tenant_id, timestamp)` and grouped into ~8192-row **granules**; the index stores **one marker per granule, not per row**, so it's KB-sized and memory-resident. A query narrows to a few granules, then reads only those.
+- **Physical layout (the subtle bit):** storage is **column-wise** — one file per column (`severity.bin`, `service.bin`, …). A **granule is a logical row-range, not a row-chunk**: the same range `[16384–24575]` is sliced into *every* column file at aligned boundaries. "Read granule 2" = seek to granule 2's offset in only the column files the query needs (`severity.bin`, `service.bin`) and **skip `message.bin` entirely**. Aligned cuts are what let a column store still reconstruct a full row (row N sits at the same position inside granule K of every column).
+- **Skip indexes** (min/max, bloom filter) extend block-pruning to non-sort-key columns — the escape hatch when a filter isn't on the `ORDER BY`.
+
+This is why ClickHouse beats Cassandra 2i / Dynamo GSI on **structured** filters and aggregations: no per-field index to declare, filters compose across columns, and it costs **one** write. **But** — it's scan-based, so it has **no inverted index → no efficient full-text** (`message CONTAINS` becomes a full column scan), and it **falls off the fast path** when the filter isn't on the sort key.
+
+**Elasticsearch — the pick.** ES *is* an inverted index: every field searchable by default, the `message` body **tokenized** for true keyword search, and arbitrary filter combinations native (posting-list intersection). One copy of the data serves *any* ad-hoc query, foreseen or not — exactly what unpredictable + full-text debugging needs.
+
+| Store | Physical layout | "Index" | Full-text? | Best fit |
+|---|---|---|---|---|
+| **Cassandra / Dynamo** | **row**, partitioned by key | per-field 2i (node-local) / GSI (cap 20) | ❌ | known-key, write-heavy point lookups |
+| **ClickHouse** | **columnar** (file per column, granules) | sparse block index + skip indexes | ❌ | predictable aggregations / dashboards |
+| **Elasticsearch** ✅ | inverted index + doc-values | inverted index (all fields) | ✅ tokenized | **unpredictable ad-hoc + keyword search** |
+
+**One-liner:** *"Logging is unpredictable reads plus full-text. Cassandra/Dynamo are key-first — one table or index per query shape, no full-text — so they're out. ClickHouse is genuinely fast via columnar scan and granule-level block-pruning, and wins the analytics fork, but has no inverted index for keyword search. ES indexes every field once and tokenizes the message body, so a single copy serves any ad-hoc query — that's why it's the store for a debugging tool."*
+
+### Deep Dive 7 — Global / multi-region topology
+
+The senior escalation. The key realization: **logs are region-local by nature, so you don't build one global logging system — you run N independent regional pipelines and federate only the reads.** Almost nothing crosses regions.
+
+**Write path stays 100% in-region.** A cross-region hop would blow the SLAs (a trans-Atlantic round trip alone is ~80ms vs. the <5ms SDK budget), so the *entire* ingest-through-index pipeline is replicated per region. Each region has its own gateway, Kafka, workers, ES, and S3 cold tier. Apps ship to their **nearest** region via GeoDNS / latency routing. This lands **data residency for free** (EU logs stay in EU → GDPR) — often a hard compliance requirement, not a nicety.
+
+![data-tables](images/hack2hire/5.png)
+
+This shards cleanly *because logs are append-only, independent events with no cross-region invariant* — nothing to reconcile, no consensus, no cross-region transaction. This is the payoff of the AP posture declared up top. Contrast the ad-budget / payment designs, where a global invariant *forced* a single-homed reconciler; logging has none. *(DDIA Ch. 5 — each region is its own leader for its own writes; multi-leader with no write coordination.)*
+
+**The one hard problem is global search — the operator, not the log.** An SRE debugging a request that hopped `us → eu → ap` needs all three regions in one view. The write path is local; the read path must **federate**.
+
+![data-tables](images/hack2hire/6.png)
+
+Three federation levers, in order of reach for:
+
+1. **Scatter-gather (default).** Global query API fans out to each region's ES; each searches locally; coordinator merges and re-sorts by timestamp. No data moves → respects residency, always current. **Cost:** query is as slow as the slowest region. **Tail fixes:** (a) a **global metadata index** — "which regions has tenant T logged to, in which windows" — so you scatter only to *relevant* regions (a tenant in 2 of 5 regions → skip 3); (b) **fail open** — return partial results with a "region X timed out" caveat rather than blocking, same principle as indexing lag.
+2. **Global metadata index.** The routing hint above — cheap, high-leverage, turns an all-region fan-out into a 2-region one.
+3. **Central analytics tier (analytics only, not debug).** For dashboards needing all regions together, **async-replicate a downsampled / cold copy** (usually regional S3 → a central ClickHouse/warehouse) as a **separate, eventually-consistent** path — explicitly *not* the interactive debug path, and residency-filtered (data that legally can't leave is excluded or aggregated-only).
+
+**The senior nuance — where residency and federation collide:** if EU logs legally *cannot leave* the EU, a scatter-gather that *reads* them from a US-hosted coordinator may itself be a violation depending on interpretation → the query coordinator often must run **per-jurisdiction**, and truly-global views are limited to residency-safe metadata or aggregates. Naming that ("federated read is easy until residency law says even the read federates per-jurisdiction") is the tell.
+
+**One-liner:** *"Logs are region-local, so I run an independent ingest-and-index pipeline per region and route each app to its nearest — hot path stays in-region for latency, and residency comes for free. Only search federates: a global coordinator scatter-gathers across regional ES and merges by timestamp, using a metadata index to hit only the regions a tenant uses and failing open with a per-region caveat. Cross-region dashboards go through a separate async analytics path off the cold tier, never the interactive one. It shards this cleanly because logs are append-only events with no cross-region invariant — no consensus, no reconciler, unlike a global budget."*
+
+---
+
+## Discussion Notes
+
+Follow-up probes worked through after the deep dives — the mechanistic "how does this actually work" questions an interviewer drills into.
+
+### Storage-engine internals
+
+**Where the SDK buffer lives.** Client-side — in the emitting app's own process memory (the SDK is a linked library). That's *why* it's non-durable and lossy: a process crash loses it, there's no disk/replication. The system's **durability boundary is the Kafka ack**; everything left of Kafka (SDK ring buffer, gateway's in-flight batch) is best-effort. Don't confuse it with the worker-side **bulk-request assembler**, which is also a "buffer" but sits on your servers, is fed from durable Kafka, and replays from the committed offset on crash.
+
+**ES schema = the index mapping, not data.** `"type": "keyword"` is a field-*type declaration* (like `VARCHAR` in a `CREATE TABLE`), not a stored value. `PUT logs-2026-08-06 { mappings }` creates the empty index once; documents flow in after. The mapping's real job is deciding **what to *not* index**: `dynamic: false` + `fields: { enabled: false }` are the load-bearing choices — they stop a tenant's arbitrary keys from causing a **mapping explosion** that destabilizes the cluster (and it's a write-throughput win: one analyzed `text` field, not dozens).
+
+**ES's three per-field structures.** For one log:
+- **`_source`** — verbatim JSON copy → used to *show the full log*. (≈ the raw row.)
+- **inverted index** — word → doc list → used to *search* (`message CONTAINS "timeout"`). `text` fields are tokenized (split into words); `keyword` fields stored whole.
+- **doc-values** — columnar per-field column → used to *sort / count / aggregate*.
+
+Rule: **filter/aggregate on it → `keyword`; search inside it → `text`.** `user_id` as `keyword` (terms-dict lookup), `message` as `text` (tokenized). ES indexes *every* mapped field by default — the mapping switches indexing **off** where wasteful/dangerous.
+
+**doc-values ≈ columnar storage** (the ES piece that enables aggregation), but ES *has* a columnar structure alongside row-ish `_source` + inverted index — it isn't columnar-native like ClickHouse. That's why ES is columnar-*enough* for filters but weaker than ClickHouse for heavy analytics.
+
+### Why not Cassandra / ClickHouse (the store fork, drilled)
+
+**Cassandra is NOT columnar** — "wide-column" is the *data model*; on disk it's **row-oriented**, grouped by partition key. It serves one lookup shape (the partition key); other filters → full-table scan. You'd model **one denormalized table per query** (write every log N times) and *still* get no full-text. Secondary indexes don't save it: Cassandra 2i is **node-local → scatter-gather** across all nodes for high-cardinality lookups like `user_id` (worsens as you scale); DynamoDB GSI is global but **caps at 20**, one-shape-per-index, multiplies write cost. None do tokenized full-text.
+
+**ClickHouse — genuinely fast, but scan-based.** Physical layout: **one file per column**, sorted by `ORDER BY`, split into **partition folders by day**. Its "index" is a **sparse primary index** — one marker per ~8192-row **granule**, not per row → tiny, memory-resident. Query path = **partition-prune → block(granule)-prune → column-prune**; skip indexes (bloom/min-max) extend pruning to non-sort-key columns. Beats 2i/GSI because it indexes *no* field per se — any column filter is cheap, filters compose, one write.
+- **Granule = logical row-range, NOT a row-chunk.** The same range `[16384–24575]` is sliced into *every* column file at aligned boundaries. "Read granule 2" = seek to granule 2's offset in only the needed column files (`severity.bin`, `service.bin`), skip `message.bin`. Aligned cuts let a column store still reconstruct a full row.
+- **Loses because:** no inverted index → `message CONTAINS` is a full column scan; and it **falls off the fast path** when the filter isn't on the sort key.
+
+**ES wins the log fork** because logging = *unpredictable reads + full-text*: inverted index makes every field searchable and the message tokenized, so **one copy serves any ad-hoc query**. ClickHouse wins the *predictable-analytics/dashboard* fork.
+
+### Sorting, ordering & indexing (the read-time subtleties)
+
+**Sorting happens at read time, not insert time**, because: (1) shifting stored data into sorted position at 500K/s is catastrophic; (2) ES doesn't know at insert which sort you'll ask for (time? severity? user?) — it can store only one physical order, so it stores *none* and sorts per query; (3) global order only exists once all shards' results are gathered — which only happens at query time. Docs are stored append-fast (unsorted); the **timestamp doc-values column** is the sorted-on-demand structure.
+
+**Indexing ≠ sorting.** Indexing = *write-time* build of the structures (inverted index + doc-values). Sorting = *read-time* consumption of what indexing built. Sequential: setup → payoff. Sorting is cheap at read *because* indexing did the prep at write. "Indexed order" ≠ "sorted order" — docs on disk are never physically sorted.
+
+**Kafka ordering vs. ES ordering — the corrected claim.** `hash(tenant+service)` **preserves** order *within* a tenant-service pair → a **single-service query is one partition, already ordered, no reconstruction needed** (my earlier "always reconstructed" was too broad). Reconstruction only matters for **cross-partition** queries — "all of a tenant's services" or a global view — where logs scatter across partitions with no Kafka-level order between them, and **ES's timestamp sort merges them at query time**. Because ES re-sorts anyway, cross-*partition* order is disposable — which is *also* why **round-robin** stays safe for a giant tenant (perfectly even load, sacrifices Kafka ordering you weren't relying on). Only safe because logs are **independent events** with no causal dependency.
+
+### Read/write contention & replicas
+
+**"Scales independently" is two-level.** *Compute tier* — genuinely independent (query API fleet vs. worker fleet autoscale separately). *Storage tier* — **shared ES cluster → reads and writes DO contend** for the same nodes' CPU/IO/page-cache/heap. Earlier "a log burst doesn't block searches" oversold it: no *logical* block, but real *physical* contention.
+
+**Replicas make it scalable, not zero.** Writes → **primary** shard; searches → **replica** shards → different physical copies on different nodes. Add replicas → **read throughput scales without touching write capacity**. Honest caveat: in ES the replica **re-indexes** (pays real indexing CPU) — replicas aren't write-free. What they buy: read load is *independently scalable* (add replicas) and *time-isolated* — with **daily rotation**, only *today's* index is dual-loaded; a replica of yesterday's write-closed index serves reads with **zero** write contention. So: bounded, separately-scalable contention. Next lever if severe: dedicated read-replica nodes or a cross-cluster replica.
+
+### Cold tier & restore (how S3 actually works here)
+
+**Who snapshots.** A dedicated **retention lifecycle worker** (hourly cron), separate from ingest/query. Per run: check each index's age vs. tenant `hot_retention` (from Postgres) → call **ES snapshot API** (streams compressed archive to S3) → **delete the index** (cheap index-drop, the payoff of daily rotation). Shared-index wrinkle: keep an index alive while *any* tenant still needs it hot; per-tenant expiry enforced at **query time**; drop only once *all* windows pass.
+
+**S3 is NOT queryable — it's a dumb key→value store.** Key = a **path string** like `archive/tenant-X/2026-07-06/segment-1.dat`; value = that one chunk's **compressed bytes**. The timestamp is just **text in the key**, not a queryable field — you can only **prefix-LIST** (gather a day's chunks *because you deliberately put the date in the key*) and **GET by exact key**. No range query, no stitching by S3.
+
+**Restore is a two-step, ES does all stitching.** (1) ES reads the day's chunks back from S3 and **rebuilds the index on local disk** (chunk-stitching); (2) normal query-time segment-merge + timestamp sort runs **in ES**. Search *never* happens in S3 — it happens in ES after restore. Deliberately slow/manual because cold tier optimizes **cost over queryability**; archive is keyed by day/tenant so you restore only the relevant slice.
+
+**Completeness is verified via a manifest, not a directory listing.** The snapshot writes a **manifest** listing every file + checksum/size. Restore reads it → GETs exactly those keys → verifies checksum per file. Missing file = 404 vs. manifest entry → **abort**; corrupt/truncated = checksum/size mismatch → **abort**. **All-or-nothing** — never a silent partial index. A snapshot is marked `SUCCESS` only once every file is confirmed uploaded (else `PARTIAL`, never restored from). S3's 11-nines durability means the real risks are a failed write or an accidental delete — both caught by the manifest check.
+
 ---
 
 ## Real-World Anchor
@@ -265,3 +331,5 @@ Daily indexes are **shared across tenants with different retention windows** —
 - **"Do we fail open or closed when the indexing pipeline is behind?"** → *Why it matters: forces the availability-during-incident trade — partial-results-with-caveat vs. erroring — which is the whole point of an observability tool.*
 - **"How do we enforce per-tenant retention when tenants share a daily index?"** → *Why it matters: surfaces the query-time-filter vs. index-drop tension and shows you thought past the happy-path 'one delete call' retention story.*
 - **"Where does sampling live — SDK or gateway — and why?"** → *Why it matters: the gateway has global per-tenant + pipeline-health visibility the SDK lacks; putting adaptive control where the information is is a systems-thinking signal.*
+- **"Why Elasticsearch and not ClickHouse or a wide-column store for the search tier?"** → *Why it matters: shows you match store to read pattern — unpredictable ad-hoc + full-text needs an inverted index; ClickHouse's columnar scan wins predictable analytics but has no full-text; Cassandra is row-oriented (not columnar) and key-first, so it's out. Naming the trap ("wide-column ≠ columnar") is the tell.*
+- **"Multi-region: do we federate reads or replicate data centrally, and where does residency force the topology?"** → *Why it matters: signals you know the write path is region-local (logs have no cross-region invariant), only search federates via scatter-gather, and residency law can push even the query coordinator per-jurisdiction — the difference between a naive "global cluster" answer and a real one.*
