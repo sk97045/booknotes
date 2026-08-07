@@ -6,7 +6,23 @@
 
 ## 1. Requirements (~5 min)
 
-### Functional (top 3, prioritized)
+
+### Clarify
+
+1. What types of events trigger webhooks? (user actions, system events, third-party integrations)
+2. Expected volume of events? (millions vs billions per day)
+3. Delivery guarantees needed? (at-least-once, exactly-once)
+4. Event ordering requirements? (strict ordering within a client, or best-effort)
+5. Latency requirements? (sub-second, minutes acceptable)
+6. Security requirements? (encryption in transit, payload signing)
+
+The answers shape fundamental design decisions:
+
+1. High throughput + low latency → Consider streaming (Kafka) over queuing (SQS)
+2. Strong security requirements → Plan for HMAC signing and payload encryption
+3. Strict ordering → Partition by client to maintain order within each client's events
+
+### Functional (top 3, prioritized) 
 
 1. **Manage webhooks (CRUD)** — clients register a callback URL + event-type filter + retry policy; update or delete.
 2. **Deliver events** — when a source emits an event, POST it to every registered endpoint subscribed to that event type.
@@ -39,9 +55,54 @@
 
 > **Key modeling insight:** `Delivery` is a first-class entity, not a field on Event. One event fans out to N webhooks; each has its own independent status, attempt count, and error. Collapsing these loses per-endpoint retry state.
 
+![data-tables](images/showoffer/4.png)
+
+```
+-- Webhook registrations
+CREATE TABLE webhooks (
+    id UUID PRIMARY KEY,
+    client_id UUID NOT NULL,
+    callback_url TEXT NOT NULL,
+    signing_secret TEXT NOT NULL,
+    event_types TEXT[] NOT NULL,
+    status VARCHAR(20) DEFAULT 'active',
+    retry_config JSONB,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_webhooks_client_event ON webhooks(client_id, event_types);
+
+-- Event log (for auditing and replay)
+CREATE TABLE events (
+    id UUID PRIMARY KEY,
+    source_id UUID NOT NULL,
+    event_type VARCHAR(100) NOT NULL,
+    payload JSONB NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+) PARTITION BY RANGE (created_at);
+
+-- Delivery tracking
+CREATE TABLE deliveries (
+    id UUID PRIMARY KEY,
+    event_id UUID NOT NULL REFERENCES events(id),
+    webhook_id UUID NOT NULL REFERENCES webhooks(id),
+    status VARCHAR(20) NOT NULL,  -- pending, success, failed
+    attempts INT DEFAULT 0,
+    last_attempt_at TIMESTAMP,
+    last_error TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_deliveries_status ON deliveries(status, webhook_id);
+
+```
 ---
 
 ## 3. API / Interface (~5 min)
+
+
+![data-tables](images/showoffer/2.png)
 
 REST over plural nouns. **Identity is derived from the auth token — never from the body.**
 
@@ -91,12 +152,93 @@ Source → Event Watcher → [persist Event + enqueue Delivery tasks] → 200 to
 
 The critical seam: **the source gets its 200 the moment the event is durably enqueued** — not when clients are reached. Delivery happens asynchronously behind the queue.
 
+```
+The webhook system is a standalone intermediary between source applications and clients:
+
+Source Application (e.g., Stripe)
+
+Generates events based on its domain logic
+Sends events to webhook system via our ingestion API
+Doesn't manage delivery - that's our job
+Webhook System (what we're designing)
+
+Receives events from sources
+Manages webhook registrations (which clients want which events)
+Handles reliable delivery with retries
+Provides delivery tracking and observability
+Client (e.g., Amazon's backend)
+
+Registers webhooks with callback URLs
+Receives HTTP POST requests when events occur
+Verifies signatures and processes events
+Returns 200 OK to acknowledge receipt
+```
 ---
 
 ## 5. High-Level Design (~12 min)
 
 
 ![data-tables](images/showoffer/1.png)
+
+### Core Components
+
+#### Webhook Manager
+
+The central registry for all webhook configurations:
+
+- Exposes REST APIs for CRUD operations on webhooks
+- Validates callback URLs (HTTPS required, DNS resolvable, reachable)
+- Generates signing secrets for HMAC verification
+- Stores configurations in database with Redis cache for fast lookups
+
+#### Event Watcher (Ingestion Service)
+
+Horizontally scalable service that receives events from source applications:
+
+- Accepts events via HTTP POST with authentication
+- Validates event schema and checks for duplicates
+- Matches events to subscribed webhooks using cached subscription data
+- Publishes delivery tasks to appropriate queues
+
+#### Message Queue
+
+Provides reliable, scalable event processing with multiple tiers:
+
+- **High Priority Queue:** Critical events (payments, security alerts)
+- **Standard Queue:** Regular business events
+- **Dead Letter Queue (DLQ):** Events that exhausted all retries
+
+AWS SQS is sufficient for most webhook systems. Kafka is overkill unless you need ultra-high throughput (millions of events per second) or complex stream processing.
+
+##### Queue vs Stream: When to Use Which
+
+| Dimension | Queue (SQS) | Stream (Kafka) |
+|---|---|---|
+| Consumption | Message deleted on ack | Retained log, replayable |
+| Fan-out | One consumer per message | Many consumer groups |
+| Ordering | Per-MessageGroupId (FIFO) | Per-partition |
+| Best for | Task distribution, retries | Replay, multi-consumer, high-throughput streams |
+
+#### Delivery Worker
+
+Consumes from queues and delivers events to callback URLs:
+
+- Retrieves event data and webhook configuration
+- Generates HMAC signature for payload verification
+- Sends HTTP POST with configurable timeout (e.g., 10 seconds)
+- Handles responses: success (2xx), client error (4xx), server error (5xx)
+- Implements retry logic with exponential backoff
+
+#### Monitoring & Alerting
+
+Essential for operational visibility:
+
+- Health checks for all internal components
+- Metrics: throughput, latency, queue depth, error rates
+- Alerts on worker failures and DLQ growth
+
+
+![data-tables](images/showoffer/3.png)
 
 **Endpoint-by-endpoint build:**
 

@@ -32,7 +32,7 @@ This section explores the high-level design of the notification system.
 How do the different notification types work at a high level?
 
 ### iOS push notification
-![ios-push-notifications](images/ios-push-notifications.png)
+![ios-push-notifications](images/alexxu/ios-push-notifications.png)
  * Provider - builds and sends notification requests to Apple Push Notification Service (APNS). To do that, it needs some inputs:
    * Device token - unique identifier used for sending push notifications 
    * Payload - JSON payload for the notification, eg:
@@ -53,29 +53,29 @@ How do the different notification types work at a high level?
 
 ### Android Push Notification
 Android adopts a similar approach. A common alternative to APNS is Firebase Cloud Messaging:
-![android-push-notifications](images/android-push-notifications.png)
+![android-push-notifications](images/alexxu/android-push-notifications.png)
 
 ### SMS Message
 For SMS, third-party providers like Twilio are available:
-![sms-messages](images/sms-messages.png)
+![sms-messages](images/alexxu/sms-messages.png)
 
 ### Email
 Although clients can setup their own mail servers, most clients opt-in to use third-party services, like Mailchimp:
-![email-sending](images/email-sending.png)
+![email-sending](images/alexxu/email-sending.png)
 
 Here's final design after including all notification providers:
-![notification-providers-design](images/notification-providers-design.png)
+![notification-providers-design](images/alexxu/notification-providers-design.png)
 
 ## Contact info gathering form
 In order to send notifications, we need to gather some inputs from the user first. That is done at user signup:
-![contact-info-gathering](images/contact-info-gathering.png)
+![contact-info-gathering](images/alexxu/contact-info-gathering.png)
 
 Example database tables for storing contact info:
-![contact-info-db](images/contact-info-db.png)
+![contact-info-db](images/alexxu/contact-info-db.png)
 
 ## Notification sending/receiving flow
 Here's the high-level design of our notification system:
-![high-level-design](images/high-level-design.png)
+![high-level-design](images/alexxu/high-level-design.png)
  * Service 1 to N - other services in the system or cron jobs which trigger notification sending events.
  * Notification system - accepts notification sending messages and propagates to the correct provider.
  * Third-party services - responsible for delivering the messages to the correct users via the appropriate medium. This part should be build \w extensibility in case we change third-party service providers in the future.
@@ -92,7 +92,7 @@ Some changes from the original naive design:
  * Add more notification servers & setup autoscaling & load balancing
  * Introduce message queues to decouple system components
 
-![high-level-design-improved](images/high-level-design-improved.png)
+![high-level-design-improved](images/alexxu/high-level-design-improved.png)
  * Service 1 to N - services which send notifications within our system
  * Notification servers - provide APIs for sending notifications. Visible to internal services or verified clients. Do basic validation. Fetch notification templates from database. Put notification data in message queues for parallel processing.
  * Cache - user info, device info, notification templates
@@ -139,7 +139,7 @@ Some questions to consider in terms of making the system reliable:
  * Will recipients receive notifications exactly once?
 
 To avoid data loss, we can persist notifications in a notification log database on the workers, which retry them in case a notification doesn't go through:
-![notification-log-db](images/notification-log-db.png)
+![notification-log-db](images/alexxu/notification-log-db.png)
 
 What about duplicate notifications?
 
@@ -176,17 +176,17 @@ Only verified and authenticated clients are allowed to send push notifications t
 
 ### Monitor queued notifications
 A critical metric to keep track of is number of queued notifications. If it gets too big, we might have to add more workers:
-![notifications-queue](images/notifications-queue.png)
+![notifications-queue](images/alexxu/notifications-queue.png)
 
 ### Events tracking
 We might have to track certain events related to a notification, eg open rate/click rate/etc.
 
 Usually, this is done by integrating with an Analytics service, so we'll need to integrate our notification system with one.
-![notification-events](images/notification-events.png)
+![notification-events](images/alexxu/notification-events.png)
 
 ## Updated design
 Putting everything together, here's our final design:
-![final-design](images/final-design.png)
+![final-design](images/alexxu/final-design.png)
 
 Other features we've added:
  * Notification servers are equipped with authentication and rate limiting.
@@ -198,7 +198,7 @@ Other features we've added:
 
  * In order to do de-duplication on client we need: 16 bytes(UUID for idempotency key) * 65K Users (Number of ports per server) * 1000 notifications = 1 GB not too bad 
 
-![jordan-channel-jordan](images/notificaiton-service-jordan.png)
+![jordan-channel-jordan](images/alexxu/notificaiton-service-jordan.png)
 
 # Step 4 - Wrap up
 We introduced a robust notification system which supports push notifications, sms and email. We introduced message queues to decouple system components.
