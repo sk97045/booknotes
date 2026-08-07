@@ -62,7 +62,7 @@ It can be implemented either client-side, server-side or as a middleware.
 Client-side - Unreliable, because client requests can easily be forged by malicious actors. We also might not have control over client implementation.
 
 i. Server-side:
-![server-side-rate-limiter](images/server-side-rate-limiter.png)
+![server-side-rate-limiter](images/alexxu/server-side-rate-limiter.png)
   * Pros
     1. No extaa N/W Calls required to perform rate limiting
     2. Fewer components to manage
@@ -71,7 +71,7 @@ i. Server-side:
     2. Rate limiting and server are tightly coupled
 
 ii. As a middleware between client and server:
-![middleware-rate-limiter](images/middleware-rate-limiter.png)
+![middleware-rate-limiter](images/alexxu/middleware-rate-limiter.png)
   * Pros
     1. Shields app server from large bursts of N/W traffic
     2. Scales up/dowm independently
@@ -79,7 +79,7 @@ ii. As a middleware between client and server:
     1. Introduces extra N/W call to API servers, Although **Caching** may help here.
 
 How it works, assuming 2 requests per second are allowed:
-![middleware-rate-limiter-example](images/middleware-rate-limiter-example.png)
+![middleware-rate-limiter-example](images/alexxu/middleware-rate-limiter-example.png)
 
 iii. In cloud microservices, rate limiting is usually implemented in the API Gateway.
 This service supports rate limiting, ssl termination, authentication, IP whitelisting, serving static content, etc.
@@ -99,7 +99,7 @@ Some of the popular algorithms - token bucket, leaking bucket, fixed window coun
 
 ### Token bucket algorithm
 Simple, well understood and commonly used by popular companies. Amazon and Stripe use it for throttling their APIs.
-![token-bucket-algo](images/token-bucket-algo.png)
+![token-bucket-algo](images/alexxu/token-bucket-algo.png)
 
 It works as follows:
  * There's a container with predefined capacity
@@ -108,7 +108,7 @@ It works as follows:
  * Each request consumes a single token
  * If no tokens left, request is dropped
 
-![token-bucket-algo-explained](images/token-bucket-algo-explained.png)
+![token-bucket-algo-explained](images/alexxu/token-bucket-algo-explained.png)
 
 There are two parameters for this algorithm:
  * Bucket size - maximum number of tokens allowed in the bucket
@@ -133,7 +133,7 @@ Similar to token bucket algorithm, but requests are processed at a fixed rate.
 How it works:
  * When request arrives, system checks if queue is full. If not, request is added to the queue, otherwise, it is dropped.
  * Requests are pulled from the queue and processed at regular intervals.
-![leaking-bucket-algo](images/leaking-bucket-algo.png)
+![leaking-bucket-algo](images/alexxu/leaking-bucket-algo.png)
 
 Parameters:
  * Bucket size - aka the queue size. It specifies how many requests will be held to be processed at fixed intervals.
@@ -155,10 +155,10 @@ How it works:
  * Each request increments the counter
  * Once the counter reaches the threshold, subsequent requests in that window are dropped
  * Could be implemented using hash-map<userId, tuple[Date, Count]>
-![fixed-window-counter-algo](images/fixed-window-counter-algo.png)
+![fixed-window-counter-algo](images/alexxu/fixed-window-counter-algo.png)
 
 One major problem with this approach is that a burst of traffic in the edges can allow more requests than allowed to pass through:
-![traffic-burst-problem](images/traffic-burst-problem.png)
+![traffic-burst-problem](images/alexxu/traffic-burst-problem.png)
 
 Pros:
  * Memory efficient
@@ -179,7 +179,7 @@ How it works:
  * Could be implemented using **LinkedList**, elements are removed from HEAD and inserted at TAIL.
 
 Note that the 3rd request in this example is rejected, but timestamp is still recorded in the log:
-![sliding-window-log-algo](images/sliding-window-log-algo.png)
+![sliding-window-log-algo](images/alexxu/sliding-window-log-algo.png)
 
 Pros:
  * Rate limiting accuracy is very high
@@ -189,7 +189,7 @@ Cons:
 
 ### Sliding window counter algorithm
 A hybrid approach which combines the fixed window + sliding window log algorithms.
-![sliding-window-counter-algo](images/sliding-window-counter-algo.png)
+![sliding-window-counter-algo](images/alexxu/sliding-window-counter-algo.png)
 
 How it works:
  * Maintain a counter for each time window. Increment for given time window on each request.
@@ -205,7 +205,7 @@ Cons:
 
 ## High-level architecture
 We'll use an in-memory cache as it's more efficient than a database for storing the rate limiting buckets - eg Redis.
-![high-level-architecture](images/high-level-architecture.png)
+![high-level-architecture](images/alexxu/high-level-architecture.png)
 
 How it works:
  * Client sends request to rate limiting middleware
@@ -221,10 +221,10 @@ Let's check those topics out, along with some other topics.
 
 ## Rate limiting rules
 Example rate limiting rules, used by Lyft for 5 marketing messages per day:
-![lyft-rate-limiting-rules](images/lyft-rate-limiting-rules.png)
+![lyft-rate-limiting-rules](images/alexxu/lyft-rate-limiting-rules.png)
 
 Another example \w max login attempts in a minute:
-![lyft-rate-limiting-auth-rules](images/lyft-rate-limiting-auth-rules.png)
+![lyft-rate-limiting-auth-rules](images/alexxu/lyft-rate-limiting-auth-rules.png)
 
 Rules like these are generally written in config files and saved on disk.
 
@@ -241,7 +241,7 @@ X-Ratelimit-Retry-After: The number of seconds to wait until you can make a requ
 ```
 
 ## Detailed design
-![detailed-design](images/detailed-design.png)
+![detailed-design](images/alexxu/detailed-design.png)
 
  * Rules are stored on disk, workers populate them periodically in an in-memory cache.
  * Rate limiting middleware intercepts client requests.
@@ -259,16 +259,16 @@ There are several challenges to consider:
    2. Single-Leader replication: Read/Write from Master, replica in sync with master. Sharding can help in increasing the througput.
 
 In case of race conditions, the counter might not be updated correctly when mutated by multiple instances:
-![race-condition](images/race-condition.png)
+![race-condition](images/alexxu/race-condition.png)
 
 Locks are a typical way to solve this issue, but they are costly.
 Alternatively, one could use Lua scripts or Redis sorted sets, which solve the race conditions.
 
 If we maintain user information within the application memory, the rate limiter is stateful and we'll need to use sticky sessions to make sure requests from the same user is handled by the same rate limiter instance.
-![synchronization-issue](images/synchronization-issue.png)
+![synchronization-issue](images/alexxu/synchronization-issue.png)
 
 To solve this issue, we can use a centralized data store (eg Redis) so that the rate limiter instances are stateless.
-![redis-centralized-data-store](images/redis-centralized-data-store.png)
+![redis-centralized-data-store](images/alexxu/redis-centralized-data-store.png)
 
 ## Performance optimization
 There are two things we can do as a performance optimization for our rate limiters:
