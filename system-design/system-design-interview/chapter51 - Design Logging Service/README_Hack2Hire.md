@@ -123,14 +123,26 @@ Follow one entry from caller to search: `log()` → SDK ring buffer (returns ins
 
 ![data-tables](images/hack2hire/1.png)
 
-**Four backpressure boundaries** — each *absorbs* pressure instead of propagating it upstream:
+### Walking the ingest pipeline — four backpressure boundaries
 
-1. **SDK buffer** — `log()` is a non-blocking enqueue into a ring buffer; full → drop oldest. Caller never waits.
-2. **Ingest gateway** — validates, rate-limits per tenant (429), publishes to Kafka. Kafka slow → 503 → SDK backs off.
-3. **Kafka** — durable event log decoupling ingest from indexing; partitioned for parallel consumption. Once acked, indexing is *guaranteed to eventually happen*.
-4. **Workers → ES** — bulk-write; commit Kafka offset **only after** a successful ES write, so a crash **replays** rather than loses. Persistent failures → dead-letter topic.
+The pipeline has **four boundaries where backpressure is absorbed rather than propagated upstream.** That framing is the whole design: pressure stops at each boundary instead of flowing back toward the caller.
 
-The **query path shares nothing with ingest** except the ES cluster it reads. A search spike doesn't slow ingest; a log burst doesn't block search beyond natural indexing lag. *(DDIA Ch. 11 — Kafka as replayable log; Ch. 12 — derived search index built from that log.)*
+1. **SDK buffer.** `log()` is a non-blocking enqueue into a ring buffer. If the buffer is full, the **oldest entry is dropped** — the caller never waits.
+2. **Ingest gateway.** Accepts batched HTTP POSTs from many SDK instances, validates the payload, and publishes to Kafka. If Kafka is temporarily slow, the gateway returns **503** and the SDK retries with backoff. It also enforces per-tenant rate limits by checking the tenant's `rate_limit_eps` from **cached** tenant metadata; requests over the limit get **429**.
+3. **Kafka.** The durable event log that decouples ingest from indexing. I'd choose Kafka here because the system needs **partitioned, replayable consumption and consumer-group semantics** for parallel indexing workers. If the stack were deeply AWS-native, **Kinesis** would also be reasonable, but Kafka is the cleaner interview default for this problem shape. Once Kafka acks a batch, the platform **guarantees those entries will eventually be indexed**; partitioning lets multiple workers consume in parallel.
+4. **Workers → Elasticsearch.** Workers consume from Kafka partitions, assemble bulk indexing requests, and write to ES. A failed bulk request is retried; if retries are exhausted, the batch goes to a **dead-letter topic** for later reprocessing. Workers commit their Kafka offset **only after a successful ES write**, so a worker crash **replays from the last committed offset without data loss.**
+
+### Query path
+
+The query path is **separate from ingest**. The query API receives operator searches, translates them into ES queries filtered by `tenant_id` + time range, and returns paginated results. Because the query API *reads* ES while indexing workers *write* it, **the two paths scale independently**: a search-traffic spike doesn't slow ingest, and a log burst doesn't block searches beyond the natural indexing lag. *(DDIA Ch. 11 — Kafka as replayable log; Ch. 12 — ES as a derived search index built from that log.)*
+
+### Cold tiering
+
+A **retention lifecycle worker** runs periodically and checks each ES index against the owning tenants' hot-retention policies. When an index exceeds the hot window, the worker **snapshots it to S3 as a compressed archive, then deletes the index from ES**. Cold logs in S3 are **not directly queryable** through the search API — retrieving them requires an explicit **restore** that re-indexes the archived segment into a temporary ES index.
+
+### Tenant metadata
+
+PostgreSQL stores tenant configuration — API keys, retention policies, rate limits. The ingest gateway **caches this locally with a short TTL** so it doesn't hit Postgres on every request (the dashed `cache TTL` arrow in the diagram). This keeps Postgres off the ingest hot path entirely while still letting rate-limit and retention changes propagate within the TTL window.
 
 **Why Elasticsearch over ClickHouse:** inverted indexes give ad-hoc full-text + arbitrary-field search (the Datadog debugging experience), and time-based index rotation matches retention cleanly. ClickHouse wins on compression and aggregate/dashboard queries but loses on interactive keyword search — the wrong trade for a debugging tool.
 
