@@ -6,6 +6,7 @@
 
 ## 1. Requirements
 
+
 ![data-tables](images/hellointerview/8.png)
 
 ### Functional Requirements
@@ -171,59 +172,27 @@ The naive instinct is to run the code on the API server. **Never do this.** Untr
 The dead-simple first pass: on each leaderboard request, query submissions for that competition and aggregate.
 
 ```sql
+WITH first_solves AS (            -- earliest ACCEPTED time per (user, problem) — dedupes retries
+  SELECT   userId, problemId, MIN(submittedAt) AS solvedAt
+  FROM     submissions
+  WHERE    competitionId = :cid AND passed = true
+  GROUP BY userId, problemId
+)
 SELECT   userId,
-         COUNT(DISTINCT problemId) AS solved,
-         MIN(submittedAt)          AS firstSolve   -- tie-break
-FROM     submissions
-WHERE    competitionId = :cid AND passed = true
+         COUNT(*)      AS solved,       -- distinct problems (already grouped by problemId)
+         MAX(solvedAt) AS finishTime    -- time of LAST solve = when they completed their set
+FROM     first_solves
 GROUP BY userId
-ORDER BY solved DESC, firstSolve ASC
+ORDER BY solved DESC, finishTime ASC;
 ```
 
-(In DynamoDB: a **GSI** partitioned on `competitionId` so you can pull all a competition's submissions without making `competitionId` the table PK — it's optional and non-unique — then group/sort in memory.)
+> **⚠️ Get the tie-break aggregate right — this is a classic trap.** The naive one-liner `MIN(submittedAt) ... ORDER BY solved DESC, firstSolve ASC` is **wrong** twice over. (1) The tie-break is *time to finish all your problems*, which is your **last** accepted solve, so you want `MAX`, not `MIN`. The user whose 5th solve landed at 00:45 beat the one whose 5th landed at 01:10. (2) You must reduce to the **first accepted submission per problem** before aggregating, or a later re-submission of an already-solved problem pollutes the finish time. Hence the two-step query above: inner CTE = earliest accepted time per problem (handles retries), outer = `MAX` of those = finish time. *(If the contest scores ICPC-style on cumulative penalty time rather than finish time, the tie-break formula changes — a clarifying question worth asking the interviewer.)*
+
+(In DynamoDB: a **GSI** with PK `competitionId`, SK `submittedAt` lets you pull all a competition's submissions in time order without making `competitionId` the table PK — then do the two-step reduction in memory.)
 
 Client re-requests every ~5s to stay fresh.
 
 **This does not scale** — every poll from every user re-runs a heavy aggregation. We fix it in Deep Dive 2. Naming the weakness yourself is the senior signal; leaving it for the interviewer to catch is not.
-
-<svg viewBox="0 0 820 380" xmlns="http://www.w3.org/2000/svg" font-family="'Comic Sans MS','Segoe Print',cursive" font-size="12">
-  <rect x="0" y="0" width="820" height="380" fill="#fdfdfb"/>
-  <!-- client -->
-  <rect x="20" y="150" width="120" height="80" rx="10" fill="#eef6ff" stroke="#3b6ea5" stroke-width="2"/>
-  <text x="80" y="185" text-anchor="middle" fill="#1f3d5c">Client</text>
-  <text x="80" y="205" text-anchor="middle" fill="#1f3d5c" font-size="10">Monaco IDE</text>
-  <!-- api server -->
-  <rect x="220" y="140" width="140" height="100" rx="10" fill="#fff7e6" stroke="#c9902a" stroke-width="2"/>
-  <text x="290" y="180" text-anchor="middle" fill="#7a5310">API Server</text>
-  <text x="290" y="200" text-anchor="middle" fill="#7a5310" font-size="10">dispatch + read</text>
-  <!-- containers box -->
-  <rect x="470" y="40" width="200" height="150" rx="8" fill="#f4eefc" stroke="#7a4fb0" stroke-width="2"/>
-  <text x="570" y="60" text-anchor="middle" fill="#4a2d75" font-size="11">Runtime Containers</text>
-  <rect x="485" y="72" width="80" height="34" rx="5" fill="#fff" stroke="#7a4fb0"/><text x="525" y="93" text-anchor="middle" font-size="10">Python</text>
-  <rect x="575" y="72" width="80" height="34" rx="5" fill="#fff" stroke="#7a4fb0"/><text x="615" y="93" text-anchor="middle" font-size="10">Java</text>
-  <rect x="485" y="116" width="80" height="34" rx="5" fill="#fff" stroke="#7a4fb0"/><text x="525" y="137" text-anchor="middle" font-size="10">JS</text>
-  <rect x="575" y="116" width="80" height="34" rx="5" fill="#fff" stroke="#7a4fb0"/><text x="615" y="137" text-anchor="middle" font-size="10">X…</text>
-  <text x="570" y="175" text-anchor="middle" fill="#4a2d75" font-size="10">sandboxed, reused</text>
-  <!-- db -->
-  <ellipse cx="740" cy="255" rx="52" ry="15" fill="#eafaf0" stroke="#2f8f5b" stroke-width="2"/>
-  <rect x="688" y="255" width="104" height="80" fill="#eafaf0" stroke="#2f8f5b" stroke-width="2"/>
-  <line x1="688" y1="255" x2="688" y2="335" stroke="#2f8f5b" stroke-width="2"/>
-  <line x1="792" y1="255" x2="792" y2="335" stroke="#2f8f5b" stroke-width="2"/>
-  <ellipse cx="740" cy="335" rx="52" ry="15" fill="#eafaf0" stroke="#2f8f5b" stroke-width="2"/>
-  <text x="740" y="295" text-anchor="middle" fill="#1c5e3a" font-size="11">DynamoDB</text>
-  <text x="740" y="312" text-anchor="middle" fill="#1c5e3a" font-size="10">Problems +</text>
-  <text x="740" y="325" text-anchor="middle" fill="#1c5e3a" font-size="10">Submissions</text>
-  <!-- arrows -->
-  <line x1="140" y1="190" x2="218" y2="190" stroke="#555" stroke-width="2" marker-end="url(#a2)"/>
-  <text x="179" y="182" text-anchor="middle" font-size="10">POST /submit</text>
-  <line x1="360" y1="165" x2="468" y2="130" stroke="#555" stroke-width="2" marker-end="url(#a2)"/>
-  <text x="410" y="140" text-anchor="middle" font-size="10">run code</text>
-  <line x1="640" y1="190" x2="700" y2="250" stroke="#555" stroke-width="2" marker-end="url(#a2)"/>
-  <text x="695" y="220" text-anchor="middle" font-size="10">results</text>
-  <line x1="360" y1="215" x2="686" y2="290" stroke="#555" stroke-width="2" marker-end="url(#a2)"/>
-  <text x="500" y="270" text-anchor="middle" font-size="10">write submission + poll status</text>
-  <defs><marker id="a2" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker></defs>
-</svg>
 
 *Caption: high-level design. Submit dispatches to a warm, language-specific container pool; results land in the submissions store; client polls for status.*
 
@@ -252,39 +221,11 @@ Progression of three approaches — walk the interviewer up the ladder:
 2. **Periodic cache**: recompute the leaderboard every ~30s into Redis, serve from cache. Big improvement, but still coarse and has an update-race window. ⚠️
 3. **Redis Sorted Set (chosen)**: maintain a live ranking in a **sorted set** keyed `competition:leaderboard:{cid}`, score = solve count (encode tie-break into the score, e.g. `solved * 1e13 - completionTimeMs`). On each accepted submission: `ZADD`. To read top-N: `ZRANGE ... REV WITHSCORES` — O(log N + M), in-memory, no DB scan. Client polls every 5s. ✅
 
-**Why not WebSockets / true push?** Overkill here. A 5s poll interval against a sorted-set read is cheap and simple, and leaderboard updates are infrequent relative to reads. The staff move is to *name* the fancier option and explain why it's unnecessary. (Nice refinement: **progressive polling** — poll every 2s in the final minutes of a contest, every 10s otherwise.)
+**Why not WebSockets / true real-time push?** Many candidates jump straight to a WebSocket connection for "live" updates. It isn't *wrong* — but it's **overkill for this system**, and being able to say why is the signal. Given the modest user count and an entirely acceptable ~5s delay, the **Redis sorted set + periodic polling** solution strikes the right balance between real-time-ness and simplicity: it's simpler to build and operate than a stateful WebSocket fabric, it's more than adequate here, and it scales up trivially if we ever need it. Persistent connections add real complexity — connection state, fan-out, reconnection handling — to buy sub-second freshness that a leaderboard simply doesn't need.
 
-<svg viewBox="0 0 780 300" xmlns="http://www.w3.org/2000/svg" font-family="'Comic Sans MS','Segoe Print',cursive" font-size="12">
-  <rect x="0" y="0" width="780" height="300" fill="#fdfdfb"/>
-  <rect x="20" y="120" width="110" height="70" rx="10" fill="#eef6ff" stroke="#3b6ea5" stroke-width="2"/>
-  <text x="75" y="160" text-anchor="middle" fill="#1f3d5c">Client</text>
-  <rect x="190" y="115" width="130" height="80" rx="10" fill="#fff7e6" stroke="#c9902a" stroke-width="2"/>
-  <text x="255" y="150" text-anchor="middle" fill="#7a5310">API Server</text>
-  <text x="255" y="170" text-anchor="middle" fill="#7a5310" font-size="10">reads top-N</text>
-  <!-- redis -->
-  <rect x="400" y="40" width="150" height="90" rx="10" fill="#fdeaea" stroke="#c0392b" stroke-width="2"/>
-  <text x="475" y="72" text-anchor="middle" fill="#8a2620">Redis</text>
-  <text x="475" y="92" text-anchor="middle" fill="#8a2620" font-size="10">Sorted Set</text>
-  <text x="475" y="108" text-anchor="middle" fill="#8a2620" font-size="10">leaderboard:{cid}</text>
-  <!-- worker -->
-  <rect x="400" y="180" width="150" height="80" rx="10" fill="#eef4ee" stroke="#2f8f5b" stroke-width="2"/>
-  <text x="475" y="215" text-anchor="middle" fill="#1c5e3a">Worker</text>
-  <text x="475" y="235" text-anchor="middle" fill="#1c5e3a" font-size="10">on accepted → ZADD</text>
-  <!-- db -->
-  <ellipse cx="700" cy="200" rx="45" ry="13" fill="#eafaf0" stroke="#2f8f5b" stroke-width="2"/>
-  <rect x="655" y="200" width="90" height="60" fill="#eafaf0" stroke="#2f8f5b" stroke-width="2"/>
-  <line x1="655" y1="200" x2="655" y2="260" stroke="#2f8f5b" stroke-width="2"/><line x1="745" y1="200" x2="745" y2="260" stroke="#2f8f5b" stroke-width="2"/>
-  <ellipse cx="700" cy="260" rx="45" ry="13" fill="#eafaf0" stroke="#2f8f5b" stroke-width="2"/>
-  <text x="700" y="235" text-anchor="middle" fill="#1c5e3a" font-size="10">Submissions</text>
-  <line x1="130" y1="155" x2="188" y2="155" stroke="#555" stroke-width="2" marker-end="url(#a3)"/>
-  <text x="159" y="147" text-anchor="middle" font-size="10">poll 5s</text>
-  <line x1="320" y1="140" x2="398" y2="100" stroke="#555" stroke-width="2" marker-end="url(#a3)"/>
-  <text x="360" y="112" text-anchor="middle" font-size="10">ZRANGE</text>
-  <line x1="475" y1="180" x2="475" y2="132" stroke="#555" stroke-width="2" marker-end="url(#a3)"/>
-  <line x1="550" y1="220" x2="653" y2="220" stroke="#555" stroke-width="2" marker-end="url(#a3)"/>
-  <text x="600" y="212" text-anchor="middle" font-size="10">write (source of truth)</text>
-  <defs><marker id="a3" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker></defs>
-</svg>
+If 5s ever feels too coarse, we just turn the dial. A nice refinement is **progressive polling**: poll more frequently (say every 2s) in the final minutes of a competition when the board is churning and stakes are high, and back off (every 10s) the rest of the time.
+
+> **This is a staff-level move, not a cop-out.** The signal isn't "I don't know WebSockets" — it's the opposite: *articulate that you know the more complex solution exists, then be explicit about why it's likely overkill for the given scale.* Reaching for the heaviest hammer available reads as junior; deliberately choosing the simpler mechanism and defending the trade-off reads as senior. Naming the fancier option and rejecting it *with a reason* beats silently building either one.
 
 *Caption: leaderboard reads served from a Redis sorted set (materialized view); the submissions table remains the source of truth.*
 
@@ -304,90 +245,10 @@ The API server scales horizontally trivially. The pressure is **CPU for code exe
 > 1. **Pre-scale / pre-warm** the container fleet ahead of scheduled contests. Contests are registered in advance, so you know the start time and rough participant count — provision capacity *before* the gun, don't chase it. This is the single most important operational point for the competition path.
 > 2. **Partial judging during the contest** (product-level load shedding, à la Codeforces). Run each submission against a **subset** of test cases (say ~10%) for live/provisional standings, then re-run the **full** suite after the deadline for official results. Slashes peak CPU by an order of magnitude and doubles as an anti-cheat measure. Trade-off: provisional results can flip after final judging — acceptable for a contest, and worth stating explicitly.
 
-<svg viewBox="0 0 860 360" xmlns="http://www.w3.org/2000/svg" font-family="'Comic Sans MS','Segoe Print',cursive" font-size="12">
-  <rect x="0" y="0" width="860" height="360" fill="#fdfdfb"/>
-  <rect x="15" y="150" width="105" height="70" rx="10" fill="#eef6ff" stroke="#3b6ea5" stroke-width="2"/>
-  <text x="67" y="185" text-anchor="middle" fill="#1f3d5c">Client</text>
-  <text x="67" y="203" text-anchor="middle" fill="#1f3d5c" font-size="9">poll /submissions/:id</text>
-  <rect x="165" y="145" width="120" height="80" rx="10" fill="#fff7e6" stroke="#c9902a" stroke-width="2"/>
-  <text x="225" y="180" text-anchor="middle" fill="#7a5310">API Server</text>
-  <text x="225" y="198" text-anchor="middle" fill="#7a5310" font-size="9">enqueue</text>
-  <!-- queue -->
-  <rect x="330" y="150" width="120" height="70" rx="6" fill="#fef7ec" stroke="#d98a2b" stroke-width="2" stroke-dasharray="5,3"/>
-  <text x="390" y="180" text-anchor="middle" fill="#8a5310">SQS Queue</text>
-  <text x="390" y="198" text-anchor="middle" fill="#8a5310" font-size="9">buffer + retries</text>
-  <text x="390" y="130" text-anchor="middle" fill="#8a5310" font-size="9">per-language queue/topic</text>
-  <!-- workers + containers -->
-  <rect x="500" y="60" width="180" height="120" rx="8" fill="#f4eefc" stroke="#7a4fb0" stroke-width="2"/>
-  <text x="590" y="82" text-anchor="middle" fill="#4a2d75" font-size="11">Workers → Fargate</text>
-  <text x="590" y="100" text-anchor="middle" fill="#4a2d75" font-size="9">(pre-warmed for contests)</text>
-  <rect x="515" y="112" width="72" height="28" rx="4" fill="#fff" stroke="#7a4fb0"/><text x="551" y="130" text-anchor="middle" font-size="9">Python×N</text>
-  <rect x="595" y="112" width="72" height="28" rx="4" fill="#fff" stroke="#7a4fb0"/><text x="631" y="130" text-anchor="middle" font-size="9">Java×N</text>
-  <rect x="515" y="146" width="72" height="26" rx="4" fill="#fff" stroke="#7a4fb0"/><text x="551" y="163" text-anchor="middle" font-size="9">JS×N</text>
-  <rect x="595" y="146" width="72" height="26" rx="4" fill="#fff" stroke="#7a4fb0"/><text x="631" y="163" text-anchor="middle" font-size="9">X×N</text>
-  <!-- redis + db -->
-  <rect x="510" y="210" width="120" height="55" rx="8" fill="#fdeaea" stroke="#c0392b" stroke-width="2"/>
-  <text x="570" y="233" text-anchor="middle" fill="#8a2620" font-size="11">Redis</text>
-  <text x="570" y="250" text-anchor="middle" fill="#8a2620" font-size="9">leaderboard ZSET</text>
-  <ellipse cx="760" cy="215" rx="48" ry="14" fill="#eafaf0" stroke="#2f8f5b" stroke-width="2"/>
-  <rect x="712" y="215" width="96" height="75" fill="#eafaf0" stroke="#2f8f5b" stroke-width="2"/>
-  <line x1="712" y1="215" x2="712" y2="290" stroke="#2f8f5b" stroke-width="2"/><line x1="808" y1="215" x2="808" y2="290" stroke="#2f8f5b" stroke-width="2"/>
-  <ellipse cx="760" cy="290" rx="48" ry="14" fill="#eafaf0" stroke="#2f8f5b" stroke-width="2"/>
-  <text x="760" y="255" text-anchor="middle" fill="#1c5e3a" font-size="10">Submissions</text>
-  <text x="760" y="270" text-anchor="middle" fill="#1c5e3a" font-size="9">(source of truth)</text>
-  <!-- arrows -->
-  <line x1="120" y1="185" x2="163" y2="185" stroke="#555" stroke-width="2" marker-end="url(#a4)"/>
-  <line x1="285" y1="185" x2="328" y2="185" stroke="#555" stroke-width="2" marker-end="url(#a4)"/>
-  <line x1="450" y1="175" x2="498" y2="140" stroke="#555" stroke-width="2" marker-end="url(#a4)"/>
-  <text x="470" y="150" text-anchor="middle" font-size="9">pull by lang</text>
-  <line x1="590" y1="180" x2="580" y2="208" stroke="#555" stroke-width="2" marker-end="url(#a4)"/>
-  <text x="620" y="198" text-anchor="middle" font-size="9">ZADD</text>
-  <line x1="660" y1="150" x2="740" y2="205" stroke="#555" stroke-width="2" marker-end="url(#a4)"/>
-  <text x="720" y="175" text-anchor="middle" font-size="9">write result</text>
-  <line x1="225" y1="225" x2="712" y2="255" stroke="#999" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#a4)"/>
-  <text x="400" y="250" text-anchor="middle" font-size="9" fill="#777">API reads status ← DB (polled)</text>
-  <defs><marker id="a4" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#555"/></marker></defs>
-</svg>
 
 *Caption: hardened design. SQS decouples submit from execution (buffer + retries); worker fleet is pre-warmed before scheduled contests; results write to the DB (truth) and the worker updates the Redis leaderboard.*
 
 **Async submit — sequence diagram:**
-
-<svg viewBox="0 0 820 380" xmlns="http://www.w3.org/2000/svg" font-family="'Comic Sans MS','Segoe Print',cursive" font-size="12">
-  <rect x="0" y="0" width="820" height="380" fill="#fdfdfb"/>
-  <!-- lifelines -->
-  <text x="70" y="30" text-anchor="middle" font-size="11" fill="#1f3d5c">Client</text>
-  <text x="230" y="30" text-anchor="middle" font-size="11" fill="#7a5310">API Server</text>
-  <text x="390" y="30" text-anchor="middle" font-size="11" fill="#8a5310">SQS</text>
-  <text x="540" y="30" text-anchor="middle" font-size="11" fill="#4a2d75">Worker+Container</text>
-  <text x="720" y="30" text-anchor="middle" font-size="11" fill="#1c5e3a">DB / Redis</text>
-  <line x1="70" y1="40" x2="70" y2="360" stroke="#bbb" stroke-dasharray="4,4"/>
-  <line x1="230" y1="40" x2="230" y2="360" stroke="#bbb" stroke-dasharray="4,4"/>
-  <line x1="390" y1="40" x2="390" y2="360" stroke="#bbb" stroke-dasharray="4,4"/>
-  <line x1="540" y1="40" x2="540" y2="360" stroke="#bbb" stroke-dasharray="4,4"/>
-  <line x1="720" y1="40" x2="720" y2="360" stroke="#bbb" stroke-dasharray="4,4"/>
-  <!-- messages -->
-  <line x1="70" y1="65" x2="228" y2="65" stroke="#333" stroke-width="1.8" marker-end="url(#s1)"/>
-  <text x="149" y="58" text-anchor="middle" font-size="10">POST /submit</text>
-  <line x1="230" y1="90" x2="388" y2="90" stroke="#333" stroke-width="1.8" marker-end="url(#s1)"/>
-  <text x="309" y="83" text-anchor="middle" font-size="10">enqueue (lang queue)</text>
-  <line x1="230" y1="118" x2="72" y2="118" stroke="#333" stroke-width="1.8" marker-end="url(#s1)"/>
-  <text x="151" y="111" text-anchor="middle" font-size="10">{ id, PENDING }</text>
-  <line x1="390" y1="150" x2="538" y2="150" stroke="#333" stroke-width="1.8" marker-end="url(#s1)"/>
-  <text x="464" y="143" text-anchor="middle" font-size="10">pull job</text>
-  <rect x="527" y="160" width="26" height="70" fill="#f4eefc" stroke="#7a4fb0"/>
-  <text x="540" y="200" text-anchor="middle" font-size="9" fill="#4a2d75">run</text>
-  <text x="540" y="212" text-anchor="middle" font-size="9" fill="#4a2d75">sandbox</text>
-  <line x1="540" y1="245" x2="718" y2="245" stroke="#333" stroke-width="1.8" marker-end="url(#s1)"/>
-  <text x="629" y="238" text-anchor="middle" font-size="10">write result + ZADD</text>
-  <line x1="70" y1="285" x2="228" y2="285" stroke="#888" stroke-width="1.5" stroke-dasharray="3,3" marker-end="url(#s1)"/>
-  <text x="149" y="278" text-anchor="middle" font-size="10" fill="#777">GET /submissions/:id (poll 1s)</text>
-  <line x1="230" y1="310" x2="718" y2="310" stroke="#888" stroke-width="1.5" stroke-dasharray="3,3" marker-end="url(#s1)"/>
-  <text x="474" y="303" text-anchor="middle" font-size="10" fill="#777">read status</text>
-  <line x1="228" y1="338" x2="72" y2="338" stroke="#333" stroke-width="1.8" marker-end="url(#s1)"/>
-  <text x="150" y="331" text-anchor="middle" font-size="10">SUCCESS + results</text>
-  <defs><marker id="s1" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#333"/></marker></defs>
-</svg>
 
 *Caption: submit is async. API returns a PENDING handle immediately; worker runs the code in isolation and writes results; client polls until the record flips to SUCCESS/FAILED.*
 
