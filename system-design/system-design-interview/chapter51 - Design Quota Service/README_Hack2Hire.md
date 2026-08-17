@@ -189,20 +189,7 @@ The tension: per-user serialization (correctness) vs throughput. Drive wants 3GB
 
 **Mechanism — pessimistic row lock.** Reserve opens a txn, `SELECT ... FOR UPDATE` on `user_quota`, checks the invariant, inserts. The lock blocks any *same-user* txn until commit/rollback; *different-user* reserves run in parallel.
 
-```mermaid
-sequenceDiagram
-    participant D as Drive (3GB)
-    participant P as Photos (2GB)
-    participant PG as Postgres shard
-    Note over D,P: user has 4GB free
-    D->>PG: BEGIN; SELECT user_quota FOR UPDATE
-    P->>PG: BEGIN; SELECT user_quota FOR UPDATE
-    Note over P,PG: Photos blocks on Drive's lock
-    PG-->>D: limit=100, committed=96 → 3GB fits
-    D->>PG: INSERT reservation(RESERVED); COMMIT
-    PG-->>P: lock acquired; committed=96, reserved=3 → 2GB does NOT fit
-    P->>PG: ROLLBACK (approved:false)
-```
+![data-tables](images/hack2hire/1.png)
 
 **Alternatives rejected:**
 - **Lock-free independent decrement** — two reads see the same available amount, both approve → over-commit that can't be undone without deleting user data. Fundamentally broken for a hard boundary.
@@ -220,19 +207,7 @@ Without reclamation, a crashed Photos upload leaves 2GB reserved forever; phanto
 
 **The dangerous race — late commit vs sweeper.** TTL expires at T=300s; both the sweeper and a late commit fire at T=301s. **Both paths lock the reservation row before checking status**, so exactly one wins:
 
-```mermaid
-sequenceDiagram
-    participant Sw as Sweeper
-    participant C as Commit (late)
-    participant PG as Postgres
-    Note over Sw,C: reservation TTL expired at T=300s
-    Sw->>PG: BEGIN; SELECT reservation FOR UPDATE
-    C->>PG: BEGIN; SELECT reservation FOR UPDATE (blocks)
-    PG-->>Sw: status = RESERVED
-    Sw->>PG: UPDATE → EXPIRED; COMMIT
-    PG-->>C: status = EXPIRED
-    C->>PG: reject → "re-reserve and retry"; ROLLBACK
-```
+![data-tables](images/hack2hire/2.png)
 
 Symmetrically, if the commit wins first it moves the row to `COMMITTED` and the sweeper skips it. The sweeper is **crash-safe by construction** (each reclaim is its own txn; a mid-batch crash just means the next run re-scans) and **idempotent** (expiring an already-expired row is a no-op). *(DDIA Ch. 8 — bounding the phantom-consumption window under process crashes.)*
 
