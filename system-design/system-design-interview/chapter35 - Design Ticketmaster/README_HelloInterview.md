@@ -115,8 +115,10 @@ WHERE ticket_id=:id
 
 No dead zone, no cron on the critical path (a lazy sweep can still tidy rows). The DB row is the single source of truth. Solid senior answer.
 
-**🟢🟢 Great — distributed lock in Redis with a TTL, DB as the durable backstop.**
-Put the hold in **Redis**: `SET lock:ticket:{id} {userId} NX EX 600`. The `NX` gives you atomic first-writer-wins; the `EX 600` auto-expires the hold in 10 min with zero reaper. Write an `in-progress` Booking row in Postgres so the intent is durable, then route the client to payment. This keeps the hot contention path (thousands hammering the same seat) *off* the transactional DB — Redis absorbs it at in-memory speed.
+**🟢🟢 Great — distributed lock in Redis with a TTL, *plus a durable hold in Postgres*.**
+Put the fast contention gate in **Redis**: `SET lock:ticket:{id} {userId} NX EX 600`. The `NX` gives you atomic first-writer-wins; the `EX 600` auto-expires the hold in 10 min with zero reaper. This keeps the hot contention path (thousands hammering the same seat) *off* the transactional DB — Redis absorbs it at in-memory speed.
+
+**Critically, also write the hold to Postgres** — the same conditional `UPDATE` from the Good solution (`status='reserved', held_by=:user, reserved_until=now()+10min`) — not just an `in_progress` Booking row. Redis absorbs *contention*; Postgres holds *truth*. If the hold lived only in Redis, an expired lock would leave Postgres with no record that the seat was ever held, and the confirm step would have nothing authoritative to validate against. (This exact gap is the subject of Deep Dive 5.5 — the lock-expires-mid-payment race.) The two-tier split only works if the correctness tier actually records ownership.
 
 ```mermaid
 flowchart LR
@@ -145,9 +147,10 @@ sequenceDiagram
         B-->>C: bookingId → payment page
         C->>B: confirm(bookingId, cardToken)
         B->>S: create PaymentIntent
-        S-->>B: webhook payment_succeeded
+        S-->>B: payment_succeeded (sync + webhook backstop)
         Note over B,D: handler idempotent on bookingId
-        B->>D: txn — ticket=sold, booking=confirmed
+        B->>D: txn — UPDATE...SET sold WHERE held_by=:user
+        Note over D: 1 row → win · 0 rows → lost seat, refund
         B-->>C: booked ✅
     else lock held
         R-->>B: nil
@@ -158,7 +161,8 @@ sequenceDiagram
 
 **Payment correctness details worth stating:**
 - The client tokenizes the card with **Stripe.js** — our servers never see raw PANs (PCI scope stays minimal).
-- Stripe confirms via **webhook**, which carries the `bookingId` in metadata. The handler runs the `ticket=sold` + `booking=confirmed` update in one transaction.
+- Stripe confirms **synchronously** (the awaited PaymentIntent result — snappy happy-path UX) *and* via **webhook** (the durable backstop for dropped connections, delayed async payment methods, or server crashes). Both run the same idempotent finalize; the webhook carries `bookingId` in metadata. See Deep Dive 5.5 for why the webhook doesn't make the path "async" — the payment call was always async.
+- The finalize is a **conditional** `UPDATE ... WHERE held_by=:user AND status!='sold'`, not a blind write. If the hold lapsed and another user took the seat, this matches **0 rows** — that's how a charged-but-lost user is detected and refunded (Deep Dive 5.5).
 - **The webhook must be idempotent.** Stripe retries on failure; use `bookingId` as the idempotency key and check current status before mutating, or you'll double-apply. This is exactly the *outbox/idempotent-consumer* discipline that separates senior from mid.
 - **Forward-only state machine:** `in_progress → confirmed` (or `→ expired/cancelled`). Terminal states are absorbing; no backward transitions. This is the same correctness primitive as payments/trading/booking systems generally.
 
@@ -254,6 +258,91 @@ flowchart LR
 
 ---
 
+### 5.5 — The lock-expires-mid-payment race (and why the webhook isn't the problem)
+
+This is the sharpest failure mode in the whole design, and the one an interviewer will push on. Two sub-questions, one root answer.
+
+#### The race
+
+The Redis hold has a 10-min TTL. Payment auth is a slow external call that can outlive it (3DS challenges, bank debits, a user idling on the card form). So this timeline is *reachable*:
+
+```
+t=0     User A reserves seat 12 → Redis lock=A (EX 600), Postgres hold: held_by=A, reserved_until=t+600
+t=590   User A stuck on Stripe 3DS challenge…
+t=600   Redis lock EXPIRES; Postgres hold also lapsed (reserved_until < now)
+t=605   User B reserves seat 12 → B's conditional UPDATE succeeds (hold lapsed) → held_by=B
+t=610   User B pays fast, confirms → ticket 12 = sold, owned by B
+t=615   User A's payment finally succeeds → webhook fires for booking_A
+        ❓ A has been charged. But B owns the seat.
+```
+
+Both users paid. This is a real double-sell **iff the confirm step trusts the reservation blindly.** It doesn't have to.
+
+#### Why it's safe: confirm is a *conditional* write, adjudicated by Postgres
+
+The Redis lock expiring is **expected behavior, not a bug** — it's an *efficiency lease* (two-tier locking). Correctness lives one tier down, in the atomic finalize. A's webhook handler must never do the naive thing:
+
+```sql
+-- 🔴 WRONG: unconditionally trusts the reservation
+UPDATE tickets SET status='sold', held_by=:A WHERE ticket_id=12;
+```
+
+It must condition on *current* ownership:
+
+```sql
+-- 🟢 RIGHT: finalize only if THIS booking still legitimately holds the seat
+UPDATE tickets
+SET status='sold', booking_id=:booking_A
+WHERE ticket_id=12
+  AND status <> 'sold'
+  AND held_by = :A;          -- A must still be the holder of record
+-- rows affected = 1 → A wins;  0 → A lost the seat → must refund A
+```
+
+Whoever's conditional `UPDATE` commits first wins the row; the loser's `UPDATE` touches **0 rows**, and *that zero is how they learn they lost* — atomically, on the single-node transaction manager, regardless of what Redis did. This is why the hold **must be durable in Postgres** (fixed in 5.1's Great solution): if the hold lived only in Redis, an expired lock would leave Postgres with no `held_by` to adjudicate against, and B's and A's writes would race with nothing arbitrating them.
+
+```mermaid
+sequenceDiagram
+    participant A as User A
+    participant B as User B
+    participant BS as Booking Service
+    participant D as PostgreSQL (truth)
+    participant S as Stripe
+    A->>BS: reserve(12) — held_by=A, reserved_until=t+600
+    Note over A,S: A idles on 3DS challenge…
+    Note over D: t=600 hold lapses (reserved_until < now)
+    B->>BS: reserve(12)
+    BS->>D: UPDATE...WHERE status='available' OR hold lapsed
+    D-->>BS: 1 row → held_by=B ✅
+    B->>S: pay → succeeds
+    BS->>D: UPDATE sold WHERE held_by=B → 1 row ✅
+    S-->>BS: A payment_succeeded (late)
+    BS->>D: UPDATE sold WHERE held_by=A
+    D-->>BS: 0 rows → A lost the seat
+    BS->>S: refund / void authorization for A
+    BS-->>A: sorry, refunded 💸
+```
+
+#### But A got charged and has no seat — resolving "paid but seatless"
+
+Any system where payment auth can outlive the hold must handle this. In order of preference:
+
+1. **Prevent it — re-validate the hold *before* charging, and keep the charge inside the window.** Don't create the PaymentIntent if `reserved_until` has already passed. And tune the TTL so the hold *comfortably exceeds* max realistic payment-auth latency — if a payment is still in-flight 15s after a hold died, the TTL is mis-sized against your payment budget. Optionally **extend `reserved_until`** the moment the user *initiates* payment, so the act of paying refreshes the lease.
+2. **Use auth-then-capture, not immediate charge.** **Authorize** A's card at reserve/confirm-start (places a hold on their funds, no settled charge), and only **capture** on a winning 0-row-free finalize. If A loses the race, you **void the authorization** — nothing to refund, since no money actually moved. Far cleaner than reversing a settled payment.
+3. **When money did settle — auto-refund on the 0-row confirm.** The handler that matches 0 rows issues a Stripe refund and marks `booking_A = failed_refunded`. This is why the webhook is not merely "apply success" — it's **reconcile**: sometimes reconciliation means reversing a charge for a seat that's gone.
+
+#### On your other question: does the webhook make this async / block the sync booking path?
+
+No — and it's worth separating the two concerns:
+
+- **The payment was *always* async.** Money moving at Stripe is a slow external call with retries, 3DS, and settlement delays. You must never hold a Postgres transaction (or a row lock) open across it — that's what the **hold/lease** is for: it protects the seat *without* an open transaction, decoupling the fast atomic reservation from the slow external charge.
+- **The webhook doesn't add asynchrony — it's the reliable completion signal for asynchrony that already existed.** The happy path uses Stripe's **synchronous** PaymentIntent response (user sees "booked" in ~1–2s). The webhook is the **durability backstop** for the cases the sync response can't cover: the browser closes after the charge but before the response, the payment method settles minutes later, or your server crashes mid-confirm.
+- **Both paths run the same idempotent, conditional finalize**, keyed on `bookingId`. Whichever arrives first wins; the second is a no-op. That idempotency is precisely *why* it's safe to race a synchronous confirm against a webhook — you get snappy UX from the sync path and guaranteed completion from the webhook, with no double-apply.
+
+> **Ties back to your core principles.** *Forward-only state machine* — A goes `in_progress → failed_refunded`, never backward. *Hold/lease ≠ lock* — the durable Postgres hold is a lifecycle-bearing record that survives Redis expiry, distinct from the efficiency lease. *Two-tier correctness* — Redis absorbs contention; the atomic conditional `UPDATE` on the single-node transaction manager is the authority. *(DDIA Ch. 7 — the conditional write is a read-check-write made atomic by isolation; `SELECT FOR UPDATE` or a version column are the pessimistic/optimistic ways to guarantee it.)*
+
+---
+
 ## Final Architecture
 
 ```mermaid
@@ -299,13 +388,9 @@ flowchart LR
 - **"What's our behavior when Redis dies mid-on-sale?"** → *Tests whether you can reason that the DB txn still guarantees no double sale — degraded UX, not broken correctness.*
 - **"Do we split event metadata from per-seat status into separate stores?"** → *Probes whether you'll shard by access pattern (immutable metadata vs. hot mutable seat state) the way real Ticketmaster appears to — the legitimate reason to break the shared DB.*
 - **"Is our webhook idempotent, and is the booking state machine forward-only?"** → *Confirms you handle Stripe retries and absorbing terminal states — the payment-correctness primitives.*
+- **"What happens if the hold expires while the payment is still authorizing?"** → *The deepest correctness probe — tests whether confirm is a conditional `UPDATE` on current ownership (0 rows → lost → refund), whether the hold is durable in Postgres not just Redis, and whether you reach for auth-then-capture so a lost race voids rather than refunds.*
 
 ![1](images/hello-interview/1.png)
 ![2](images/hello-interview/2.png)
 ![3](images/hello-interview/3.png)
 ![4](images/hello-interview/4.png)
-
-
-## Artifacts
-
-HelloInterview link: https://www.youtube.com/watch?v=fhdPyoO6aXI&t=1s&ab_channel=HelloInterview-SWEInterviewPreparation
