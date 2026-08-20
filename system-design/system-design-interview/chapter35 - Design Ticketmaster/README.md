@@ -300,10 +300,10 @@ flowchart LR
 - **"Do we split event metadata from per-seat status into separate stores?"** → *Probes whether you'll shard by access pattern (immutable metadata vs. hot mutable seat state) the way real Ticketmaster appears to — the legitimate reason to break the shared DB.*
 - **"Is our webhook idempotent, and is the booking state machine forward-only?"** → *Confirms you handle Stripe retries and absorbing terminal states — the payment-correctness primitives.*
 
-![1](images/1.png)
-![2](images/2.png)
-![3](images/3.png)
-![4](images/4.png)
+![1](images/hello-interview/1.png)
+![2](images/hello-interview/2.png)
+![3](images/hello-interview/3.png)
+![4](images/hello-interview/4.png)
 
 
 ## Artifacts
