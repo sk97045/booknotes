@@ -1,190 +1,313 @@
 # Design an S3-like Object Storage System
 
-> **The one-liner:** *You don't store objects — you store content-addressed chunks. Dedup and replication both fall out for free once the chunk hash is the universal address. The whole design lives or dies on the delete path.*
+> **Difficulty:** Medium · **Stage:** Onsite · **Asked by:** Google, Amazon, Microsoft, +4
+> A flat-namespace store addressed by `bucket/key`. Clients `PUT`/`GET`/`DELETE` immutable objects; the service owns durability, replication, dedup, and scale. The design splits a tiny consistent **metadata index** from a massive distributed **data layer**, with content-addressable dedup so identical bytes are stored once.
 
 ---
 
 ## 1. Requirements
 
-### Clarifying questions (the dialogue I'd drive)
+### Clarifying Questions
 
-| I ask | Interviewer says | What it locks in |
+| You ask | Interviewer says | Takeaway |
 |---|---|---|
-| Storage engine, or access-control/user-mgmt too? | Storage engine + data path only | Focus on chunk placement, dedup, durability — not IAM |
-| Durability target? Survive a whole rack, or just nodes? | 11 nines; survive full rack loss | Placement must span independent failure domains |
-| Is dedup a hard requirement or a future optimization? | **Hard requirement** — identical content shares storage | Delete becomes a *shared-reference accounting* problem |
-| Object size range? One upload path for all? | KB → multi-GB, single client experience | Unified pipeline; small-payload lookups + large chunk streams |
-| Do bulk bytes traverse the control plane? | No — control plane orchestrates, bytes go direct | Presigned URLs; gateway never proxies blobs |
-| Can delete reclaim disk immediately? | No — must be safe vs. in-flight uploads | **Deferred GC with a safety window** |
+| Storage engine only, or access control + user management too? | **Storage engine and data path.** ACL/users out of scope. | Focus on storage correctness and data-path performance, not policy. |
+| Durability target? Must we survive a full-rack loss, not just a node? | **Eleven nines. Survive a whole rack.** | Replicas span racks; recovery accounts for rack-wide power/network failure. |
+| Is dedup a hard requirement or a future optimization? | **Hard requirement.** Identical content from different users shares physical storage — primary cost lever at PB scale. | Deletes become a **shared-reference accounting** problem, not a synchronous byte removal. |
+| Object size range? Small objects too, from the same path? | **A few KB to multiple GB.** One upload experience regardless of size. | Same flow handles small objects efficiently and streams large ones in chunks. |
+| For large uploads, must raw bytes flow through the metadata control path? | **No.** Control path = orchestration only; bulk bytes go **directly** to storage. | Metadata path handles coordination; object bytes bypass it. Large uploads can't starve metadata lookups. |
+| On delete, can space be reclaimed immediately? | **No.** Delete must be safe against in-flight uploads that may commit the same content. | Delete ≠ disk reclamation. **Deferred cleanup** protects concurrent uploads sharing a hash. |
 
-### Functional requirements (prioritized)
+### Functional Requirements (top priority in bold)
 
-1. **PUT** an object into a bucket under a unique key.
-2. **GET** an object by bucket + key.
-3. **DELETE** an object by bucket + key.
-4. **Deduplicate** identical content — same bytes stored once on disk.
-5. **LIST** objects in a bucket with prefix filter + cursor pagination.
+1. **`PUT` an object** to a named bucket with a unique key.
+2. **`GET` an object** by bucket and key.
+3. **`DELETE` an object** by bucket and key.
+4. **Dedup identical content** — same bytes stored once on disk.
+5. `LIST` objects in a bucket with prefix filter + cursor pagination.
 
-### Non-functional requirements (quantified)
+### Non-Functional Requirements (quantified)
 
-- **Durability: 11 nines (99.999999999%)** via 3× replication across independent failure domains (racks).
-- **Read availability: 99.99%** — route to surviving replicas through single-node/single-rack failure.
-- **Scale:** petabyte-scale, hundreds of commodity nodes, **10B+ objects**.
-- **Dedup is the primary cost lever** — repeated content approaches zero marginal storage.
-- **Latency:** first-byte < 200 ms for objects ≤ 1 MB; throughput-bound delivery for >100 MB.
-- **One upload path** from a few KB to multiple GB — no separate client flow per size.
+- **Durability: 11 nines (99.999999999%)** via replication across independent failure domains (racks).
+- **Read availability: 99.99%** — route to surviving replicas through single-node / single-rack failure.
+- **Scale:** PB-scale, hundreds of commodity nodes, **10B+ objects**.
+- **Dedup** is the primary cost lever — repeated content → near-zero marginal storage.
+- **Latency:** first byte < **200 ms** for objects ≤ 1 MB; throughput-bound delivery for > 100 MB.
+- One upload path from KB to GB — no separate client flow by size.
 
-### Capacity estimation (only the numbers that change a decision)
+### Capacity Estimation (only where it changes a decision)
 
-| Parameter | Estimate | Why it matters |
-|---|---|---|
-| Total objects | 10 B | Forces metadata sharding by `bucket_id` |
-| Avg object size | 1 MB | Most objects are single-chunk → chunking overhead trivial |
-| Raw storage | ~10 PB | — |
-| Replication | 3× → ~30 PB | Each avoided unique chunk saves **3** physical copies |
-| Dedup savings | ~30% | Avoids ~9 PB of *replicated* data — cost lever is amplified by RF |
-| Chunk size | 64 MB | 10 TB disk ≈ 160k chunk files — file count stays manageable |
-| Ingest | ~100 TB/day (~1.2 GB/s) | Justifies bypassing the gateway for bytes |
-| Peak read | 50k QPS | Redis in front of metadata for hot manifests |
+| Parameter | Estimate |
+|---|---|
+| Total objects | 10 B |
+| Avg object size | 1 MB |
+| Raw storage | ~10 PB |
+| Replication factor | 3× |
+| Replicated storage | ~30 PB |
+| Daily uploads | 100 M |
+| Daily ingest | ~100 TB/day (~1.2 GB/s sustained) |
+| Peak read QPS | 50,000 |
+| Chunk size | 64 MB |
+| Avg dedup savings | ~30% (workload-dependent) |
 
-The dedup ratio is the headline cost number: at 30% across 10 PB raw, RF amplifies the saving 3× because one fewer unique chunk removes three copies.
+Two numbers drive design decisions. **Dedup ×3 replication:** one avoided unique chunk saves *three* physical copies, so 30% dedup on 10 PB avoids ~9 PB of replicated writes — this is why dedup, not compression, is the cost lever. **64 MB chunk size:** a 10 TB disk holds ~160K chunk files, keeping per-disk file counts (and inode/heartbeat overhead) manageable while staying coarse enough that small objects are a single chunk.
 
 ---
 
 ## 2. Core Entities
 
-- **Bucket** — namespace owner; enforces global bucket-name uniqueness.
-- **Object** — the lifecycle anchor. *An object exists iff it has a row.* Maps `(bucket, key)` → metadata.
-- **Chunk** — a unique content hash (SHA-256), its `reference_count`, byte size, and replica locations. **The reference count is the correctness linchpin.**
-- **Object→Chunk manifest** — the ordered list (`chunk_index`) of chunk hashes that reconstructs the byte stream.
-- **Data Node** — commodity server; stores chunk files on a local FS (ext4/XFS), named by content hash.
-
-**The durable boundary is deliberately split:** metadata (bucket/key → manifest + reference counts) is *strongly consistent* and lives in a relational store. Chunk bytes live on data-node local FS. Heartbeats and chunk-location reports are *ephemeral and rebuildable* from disk scans. After any crash, **the metadata store is the authoritative truth** — it knows what should exist and drives re-replication and GC.
+- **Bucket** — top-level container, globally unique name.
+- **Object** — the lifecycle anchor: a `(bucket, key)` exists iff its manifest row exists.
+- **Chunk** — a unique content-hash-addressed blob; the unit of storage, dedup, and replication.
+- **Manifest** — ordered list of chunk hashes reconstructing an object's byte stream.
+- **DataNode** — commodity server holding chunk files on a local FS (ext4/XFS).
 
 ---
 
 ## 3. Data Model
 
-```
-buckets        (bucket_id PK, name UNIQUE, created_at, ...)
-objects        (object_id PK, bucket_id, key, size, deleted, created_at,
-                UNIQUE(bucket_id, key))
-object_chunks  (object_id, chunk_index, chunk_hash,
-                PK(object_id, chunk_index))          -- the manifest
-chunks         (chunk_hash PK, reference_count, size, replica_nodes[])
+The **durable boundary is intentionally split**. Object metadata + chunk reference counts must survive any crash → relational metadata store (the authoritative truth after failure). Chunk *bytes* live on data-node local filesystems, named by content hash. Heartbeats and chunk-location reports are ephemeral and rebuildable from disk scans.
+
+*DDIA Ch. 7 (Transactions):* the reference count is the correctness linchpin — it must be mutated **in the same transaction** as the object row, or a drift below reality causes **data loss** and above reality causes a **storage leak**.
+
+```mermaid
+erDiagram
+    BUCKETS ||--o{ OBJECTS : contains
+    OBJECTS ||--o{ OBJECT_CHUNKS : "manifest (ordered)"
+    CHUNKS  ||--o{ OBJECT_CHUNKS : "referenced by"
+
+    BUCKETS {
+      uuid bucket_id PK
+      string name UK
+    }
+    OBJECTS {
+      uuid object_id PK
+      uuid bucket_id FK
+      string key
+      bigint size
+      bool   deleted
+    }
+    OBJECT_CHUNKS {
+      uuid   object_id FK
+      int    chunk_index
+      string chunk_hash FK
+    }
+    CHUNKS {
+      string chunk_hash PK
+      int    reference_count
+      bigint size
+      json   replica_nodes
+    }
 ```
 
-**Access patterns**
-- **GET:** point lookup on `(bucket_id, key)` → join `object_chunks` for the ordered manifest + replica locations.
-- **PUT:** insert `objects` row + `object_chunks` rows + increment `reference_count` on each chunk — **one transaction**.
-- **DELETE:** mark object deleted + decrement each chunk's ref count + enqueue zero-ref chunks for GC — **one transaction**.
+**Access patterns → schema**
+
+- **GET:** point lookup `(bucket_id, key)` → join `object_chunks` → ordered manifest + replica locations.
+- **PUT (single txn):** insert `objects`, insert ordered `object_chunks`, `reference_count += 1` on each chunk.
+- **DELETE (single txn):** mark object deleted, `reference_count -= 1` per chunk, enqueue zero-ref chunks for GC.
 - **LIST:** range scan on `(bucket_id, key)`, cursor = last-seen key.
 
-**Two invariants the schema protects**
-1. **Reference counts equal the true number of live manifests pointing at a chunk.** Drift *below* → premature delete → data loss. Drift *above* → storage leak. This is why PUT and DELETE wrap the count mutation in the *same* transaction as the object-row mutation.
-2. **An object is visible only after its manifest fully commits.** Partial uploads (chunks on disk, manifest uncommitted) never appear in LIST/GET.
+**Invariants.** (1) `reference_count` always equals live manifests pointing at a chunk — enforced by wrapping ref-count updates in the object-row transaction. (2) An object is visible **only after** its manifest commits; partial uploads (chunks on disk, manifest uncommitted) never appear in `LIST`/`GET`.
 
-**Storage choice:** PostgreSQL — access is relational (object↔chunk joins) and ref-count updates need transactions. Partitions to billions of rows by `bucket_id`. Redis fronts hot-manifest reads. At extreme scale a KV store (DynamoDB) with atomic increment is the escape hatch, trading transactional cross-entity safety for partition-level atomics.
+**Store choice.** **PostgreSQL** for metadata — access is relational (object↔chunk joins) and ref-counts need transactions. Partitions to billions of rows. At extreme scale a distributed KV (DynamoDB w/ atomic increment) can replace it, trading cross-object/chunk transactional safety for partition-level atomics. **Redis** caches hot manifests. Chunk bytes: local FS keyed by **SHA-256** filename.
+
+Core read-path query:
+
+```sql
+SELECT c.chunk_hash, oc.chunk_index, c.size, c.replica_nodes
+FROM object_chunks oc
+JOIN chunks c ON oc.chunk_hash = c.chunk_hash
+WHERE oc.object_id = $1
+ORDER BY oc.chunk_index;
+```
+
+**Indexing / partitioning.** `objects` PK `object_id`, unique `(bucket_id, key)` (serves point lookup + LIST prefix scan), hash-partition by `bucket_id`. `chunks` PK `chunk_hash`. `object_chunks` PK `(object_id, chunk_index)`.
 
 ---
 
-## 4. API / System Interface
+## 4. API / Interface
 
-**The single most important contract: the gateway handles metadata and coordination only — it never proxies blob bytes.** Bulk transfer goes client ↔ data node directly via time-limited presigned URLs. Objects are immutable; overwrite = delete + create.
+REST for CRUD + LIST. **The gateway handles only metadata and coordination — it never proxies blob bytes.** Large transfers go client↔data-node directly via **presigned URLs**. Objects are immutable: overwriting a key = delete old + create new.
 
-```
-PUT    /{bucket}/{key}                          → upload (chunk + dedup handshake)
-GET    /{bucket}/{key}                           → resolve manifest → presigned download URLs
-DELETE /{bucket}/{key}                           → mark deleted, decrement refs, enqueue GC
-GET    /{bucket}?prefix=&marker=&maxKeys=1000    → prefix range scan, cursor pagination
-```
+> **How I'd say it:** *"First I'd clarify — storage engine or just the API layer? That decides whether I go deep on chunk placement and dedup internals or on request routing. Here it's the engine, so the API is deliberately thin."*
 
-**Upload handshake (PUT):**
-1. Gateway/chunking service splits the stream into 64 MB chunks, computes SHA-256 per chunk.
-2. For each hash, check metadata: exists with positive ref count → already stored, skip the byte transfer.
-3. For new chunks, gateway picks rack-aware placement and returns presigned upload URLs; client streams bytes directly to the assigned data nodes.
-4. After all chunks reach RF=3, gateway commits the manifest in **one transaction** (object row + ordered `object_chunks` + ref-count increments). Object becomes visible only now. Interrupted upload → nothing visible, client retries the full PUT; orphaned chunks are swept by GC.
+**`PUT /{bucket}/{key}`** — client sends body; gateway coordinates:
+1. Split stream into 64 MB chunks, SHA-256 each.
+2. Per hash, check metadata store — exists w/ positive ref-count ⇒ skip upload (dedup hit).
+3. New chunks: metadata service picks placement across distinct racks; gateway returns presigned upload URLs (client → data nodes directly).
+4. After all chunks replicated ×3, **commit manifest in one txn** (object row + ordered `object_chunks` + ref-count increments). Object becomes visible only now. Interrupted upload ⇒ nothing visible; client retries.
 
-**Download (GET):** resolve manifest (Redis on hot path) → single-chunk objects redirect to the data node; multi-chunk objects get parallel presigned URLs reassembled by `chunk_index`. A dead replica falls back to another of the three. Byte-range headers allow resume.
+**`GET /{bucket}/{key}`** — resolve manifest (Redis on hot path) → return presigned download URLs / redirect. Multi-chunk: client fetches in parallel, reassembles by `chunk_index`. Recovery: retry from last chunk via `Range` header.
 
-> **How I'd say it in the room:** *"The API is deliberately thin. Its only job is the metadata handshake — hash, dedup-check, placement, presigned URLs. The moment blobs touch the gateway, gateway capacity and data throughput are coupled, and a few multi-GB uploads starve every metadata lookup."*
+**`DELETE /{bucket}/{key}`** — mark deleted, decrement ref-counts, enqueue zero-ref chunks for GC; returns success on metadata commit. Bytes reclaimed **asynchronously**.
+
+**`GET /{bucket}?prefix=&marker=&maxKeys=`** — range scan on `(bucket_id, key)`, `marker` = last key of previous page, `maxKeys` default 1000.
+
+**Why bytes bypass the gateway.** Proxying a 5 GB upload ties up a gateway connection for minutes and makes it a *throughput* bottleneck + SPOF for in-flight transfers. Streaming without buffering fixes memory but not throughput — every byte still burns gateway CPU/network. Presigned URLs decouple **coordination capacity** (scales with metadata QPS, lightweight RPCs) from **data throughput** (scales with disk/NIC), and naturally spread load across the data-node fleet. Cost: clients do multi-step uploads — standard in production object stores.
 
 ---
 
 ## 5. High-Level Design
 
-### The simplest thing that could work
+**Start with the simplest thing that works.** Two parts: a **Metadata Service** owning `bucket/key → location`, and **Data Nodes** holding raw bytes. Write: client registers object → service assigns a node → client streams bytes to it. Read: ask service for location → fetch from node. The service never sees bytes; the node never knows bucket/key.
 
-![data-tables](images/hack2hire/1.png)
-
-Two moving parts: a **Metadata Service** owning `bucket/key → location`, and **Data Nodes** holding raw bytes. Write: client registers object with metadata, gets a node, streams bytes to it directly. Read: ask metadata for the location, fetch bytes directly. The metadata service never sees bytes; the data node never knows bucket/key names.
-
-Three pressures break this minimal shape and force the real design:
-1. **Single-blob storage wastes space** when uploads share content → need a **content-addressed chunk store** so cost tracks *unique* content, not total uploads.
-2. **One data node is an SPOF** — 11 nines demands replicas across independent failure domains → **rack-topology awareness** the minimal design can't express.
-3. **Streaming a multi-GB blob to one node saturates it** → fixed-size **chunking + parallel upload** makes large ingest tractable.
+Three pressures force the richer design:
+1. **Dedup** — objects share common blocks; a content-addressed chunk store makes cost a function of *unique content*, not total uploads.
+2. **Durability** — one node is a SPOF; 11 nines needs rack-aware replica placement, which the minimal design can't express.
+3. **Large objects** — streaming multi-GB to one node saturates NIC/RAM; fixed-size chunks uploaded in parallel make ingestion tractable.
 
 ### Architecture
 
-![data-tables](images/hack2hire/2.png)
+```mermaid
+flowchart LR
+    Client -->|"CRUD / LIST (metadata only)"| GW["API Gateway<br/>coordination + presigned URLs"]
+    GW -->|"lookup / commit"| MS["Metadata Service"]
+    MS -->|"read-through"| Cache[["Redis (hot manifests)"]]
+    MS -->|"txn: objects, object_chunks, ref-counts"| DB[("PostgreSQL<br/>sharded by bucket_id")]
 
-**Reading the diagram:** solid arrows are correctness-critical control paths; the **dashed** arrows are performance/optimization paths — the Redis read-through, and the **direct client↔data-node byte transfer** that bypasses the gateway entirely. The metadata service is the authoritative brain; data nodes are dumb storage reporting chunk inventories via heartbeats.
+    Client -.->|"presigned PUT/GET bytes (bypass GW)"| DN1["DataNode A · rack 1"]
+    Client -.->|"presigned bytes"| DN2["DataNode B · rack 2"]
+    Client -.->|"presigned bytes"| DN3["DataNode C · rack 3"]
 
-**Why the split scales:** metadata is tiny (~KB/object) but must be strongly consistent for ref-count correctness; data is massive but needs only eventual consistency for replica-location tracking, since heartbeats let metadata re-verify placement anytime. So the metadata layer is a sharded Postgres cluster and the data layer grows by bolting on commodity disk servers — independently.
+    DN1 -.->|"heartbeat + chunk inventory"| MS
+    DN2 -.->|"heartbeat"| MS
+    DN3 -.->|"heartbeat"| MS
 
-*Real-world anchor: this is the GFS/HDFS lineage — a single logical "master" for metadata + commodity chunkservers — updated with S3's content-addressing and presigned-URL data path. Bytebytego's object-storage breakdown draws the same metadata/data plane split.*
+    classDef node fill:#eef2f7,stroke:#334155,color:#0f172a;
+    class Client,GW,MS,Cache,DB,DN1,DN2,DN3 node;
+    linkStyle default stroke:#1f2937,stroke-width:1.5px;
+```
+
+Three layers: **API Gateway** (edge — auth, coordinates lookups, issues presigned URLs, never proxies bytes); **Metadata Service** (PostgreSQL: bucket/object/chunk relations, ref-counts, chunk-location map; Redis in front); **Data Nodes** (commodity disks storing hash-named chunk files, reporting inventory via heartbeats). The metadata service is the authoritative brain; data nodes are dumb storage.
+
+### Flow 1 — Upload (with dedup check)
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant GW as API Gateway
+    participant MS as Metadata Service
+    participant DN as Data Nodes (×3 racks)
+    C->>GW: PUT /{bucket}/{key} (stream)
+    loop each 64MB chunk
+        GW->>GW: SHA-256(chunk)
+        GW->>MS: chunk exists? (ref_count > 0)
+        alt dedup hit
+            MS-->>GW: yes → skip upload
+        else new chunk
+            MS-->>GW: placement (3 racks) + presigned URLs
+            C->>DN: upload chunk directly
+            DN-->>C: stored (×3 replicas)
+        end
+    end
+    GW->>MS: COMMIT manifest txn (rows + ref-count++)
+    MS-->>GW: committed → object now visible
+    GW-->>C: 200 OK
+    Note over MS,DN: uncommitted chunks = orphans → GC later
+```
+
+### Flow 2 — Download
+
+Gateway resolves the manifest (Redis on hot path) → ordered chunk hashes + data-node locations. Single-chunk: redirect to the holding node. Multi-chunk: presigned URLs, client fetches in parallel, reassembles by `chunk_index`. **Each chunk lives on 3 independent nodes; the client needs only one healthy copy** — a dead node just fails over to another replica. This is where read availability lives.
+
+### Flow 3 — Deletion
+
+Gateway → metadata service removes the object row and decrements every chunk's ref-count in one txn. Any chunk hitting **zero refs is enqueued for GC, not deleted**. This is where content-addressed dedup makes deletion *dangerous*: the same hash may be referenced by millions of objects, or by an in-flight upload that hasn't committed its manifest. Delete too eagerly → data loss; too conservatively → storage leak. The GC safety window resolves this (Deep Dive 1).
+
+> **⚠️ The delete path is where correctness is hardest.** A transactional ref-count decrement is the *minimum* bar; the GC must additionally guard against the race with concurrent uploads.
+
+**Why it holds together.** Metadata is small (~KB/object) but must be strongly consistent for ref-count correctness; data is massive but needs only eventual consistency on replica-location (the service re-verifies via heartbeats). That split lets metadata be a sharded Postgres cluster while the data layer grows by bolting on disk servers — *DDIA Ch. 5–6 (replication, partitioning).*
 
 ---
 
 ## 6. Deep Dives
 
-The two hardest parts are the **dedup/GC lifecycle** and the **replication layer** — the interviewer's explicit focus, and where the 11-nines promise actually lives. Correctness bugs hide here.
+The two hardest parts: the **dedup lifecycle** (interviewer's explicit focus) and **replication** (where the 11-nines promise actually lives).
 
 ### Deep Dive 1 — Content-addressable dedup + garbage collection
 
-The **write** path is the easy half: hash each chunk with SHA-256, use the hash as the storage address. Existing hash → skip the byte upload, just increment the ref count. Two users uploading the same 10 GB backup produce identical hashes, so one physical copy. Dedup falls out for free.
+The **write** path is easy: hash each chunk, hash *is* the address; existing hash ⇒ skip + increment. Two users uploading the same 10 GB backup produce identical hashes → one physical copy. Dedup falls out for free.
 
-The **delete** path is where it's genuinely hard. Deleting an object drops one reference from each chunk in its manifest. A chunk hitting **zero references** *looks* reclaimable — but there's a race:
+The **hard part is deletion.** When an object is deleted, each manifest chunk loses a reference. Zero refs *seems* reclaimable — but there's a race: another client may be uploading a new object referencing that same hash. If GC deletes the chunk between the uploader's existence-check and its manifest commit, the new manifest points at bytes that no longer exist → **data loss**.
 
-> A concurrent uploader may have just dedup-checked this same hash (found it present, decided to skip the byte upload) and **not yet committed its manifest**. If GC deletes the chunk in that window, the new object's manifest points at bytes that no longer exist. **That is silent data loss.**
+**Solution: deferred GC with a safety window.**
 
-**The fix: deferred GC with a safety window.** When a ref count reaches zero, the metadata service does *not* delete — it records the zero-timestamp and enqueues the chunk as a GC *candidate*. A background collector only physically deletes if the count is *still* zero after a grace period. Any upload that re-references the chunk during the window bumps the count and removes it from the queue.
+```mermaid
+sequenceDiagram
+    participant D as DELETE txn
+    participant MS as Metadata Service
+    participant GC as Garbage Collector
+    participant DN as Data Nodes
+    D->>MS: ref_count-- → reaches 0
+    MS->>MS: record zeroed-at timestamp, add to GC queue
+    Note over MS,GC: grace period (e.g. 24h) — longer than max upload time
+    GC->>MS: still 0 after grace?
+    alt a concurrent PUT referenced it during grace
+        MS-->>GC: ref_count > 0 → remove from queue (abort)
+    else still zero
+        MS->>MS: mark "pending deletion"
+        GC->>DN: delete all replicas
+        DN-->>GC: confirmed
+        GC->>MS: remove chunk row
+    end
+```
 
-**The grace period must exceed the maximum possible upload duration.** If a huge object over a slow link can take 6 h, the window must be ≥ 6 h — set it to **24 h** for margin against retries and clock skew.
+When ref-count hits zero the service **records the zeroing time and queues the chunk** rather than deleting. A background GC scans the queue and only physically deletes if the count is *still* zero after a configurable grace period. A new upload during the grace lifts the count and evicts the chunk from the queue. **The grace period must exceed the maximum possible upload duration** — if a huge object over a slow link can take 6h, grace ≥ 6h; 24h gives margin for retries and clock skew. Physical deletion is **two-phase**: confirm zero → mark *pending deletion* → delete replicas on data nodes → only then drop the chunk row.
 
-Physical deletion is **two-phase**: (1) reconfirm ref count is still zero and mark the chunk `pending_deletion`; (2) send delete commands to every replica; only after all replicas confirm, remove the `chunks` row.
+> **How I'd say it:** *"Tight on time, I'd spend it here — this is where correctness bugs hide. The aha is: you don't store objects, you store content-addressed chunks. Dedup and replication both simplify once the hash is the universal address."*
 
-
-> **How I'd say it in the room:** *"The aha moment is that you don't store objects, you store content-addressed chunks — so delete is never a byte operation, it's a reference-accounting operation with a safety window sized to the longest possible upload. Eager delete loses data; timid delete leaks storage. The window is how you buy correctness against the check-then-commit race."*
-
-*DDIA Ch. 7 (Read Committed / the lost-write & write-skew family) — the dedup-check-then-commit race is a textbook time-of-check-to-time-of-use hazard; the safety window is the pragmatic alternative to serializing every uploader against GC.*
+*Real-world anchor:* this is the classic content-defined store behind Dropbox/Git and dedup backup systems — hash-as-address plus reference counting.
 
 ### Deep Dive 2 — Replication + failure recovery
 
-Each chunk → **3 replicas in 3 different racks**. Rack-aware placement means one rack losing power/switch/cooling can't destroy all copies. The metadata service records `replica_nodes` and picks placement at upload time.
+Each chunk → **3 replicas in 3 different racks** (rack-aware placement) so a single rack's power/switch/cooling failure can't destroy every copy. *DDIA Ch. 5.*
 
-**Why 3× replication, not erasure coding, as the baseline?** A common mistake is jumping straight to Reed-Solomon. RS 6+3 cuts overhead 3× → ~1.5×, but adds encode/decode compute, multi-node reconstruction on recovery, and messy partial-failure handling. And **dedup has already removed much of the redundancy**, so EC's storage win is smaller here than it looks. 3× is simple, recovers by a single copy from a survivor, and is easy to reason about — the right starting point; mention EC as the cold-tier optimization.
+```mermaid
+flowchart LR
+    subgraph R1["Rack 1"]
+      A1["DataNode A<br/>chunk X"]
+    end
+    subgraph R2["Rack 2"]
+      B1["DataNode B<br/>chunk X"]
+    end
+    subgraph R3["Rack 3"]
+      C1["DataNode C<br/>chunk X ✗ (failed)"]
+    end
+    subgraph R4["Rack 4"]
+      D1["DataNode D<br/>← re-replicated"]
+    end
 
-**Failure recovery flow:** metadata detects a dead node via **missed heartbeats (~30 s silence)** → finds all chunks that lived there → any chunk now below RF=3 is flagged under-replicated and enqueued for re-replication. The pipeline copies from a surviving replica to a fresh node in a different rack, **throttled** (cap concurrent copies per source) and **prioritized** (a chunk with 1 surviving copy outranks one with 2). If the dead node returns post-recovery, its stale inventory is reconciled against the authoritative map and its extra copies marked surplus for cleanup.
+    MS["Metadata Service<br/>missed heartbeat → under-replicated"]
+    MS -.->|"detect (30s silence)"| C1
+    A1 ==>|"copy from surviving replica"| D1
+    MS -->|"enqueue re-replication (throttled, prioritized)"| A1
 
+    classDef node fill:#eef2f7,stroke:#334155,color:#0f172a;
+    classDef plane fill:#f8fafc,stroke:#94a3b8,color:#0f172a;
+    class A1,B1,C1,D1,MS node;
+    class R1,R2,R3,R4 plane;
+    linkStyle default stroke:#1f2937,stroke-width:1.5px;
+```
 
-*DDIA Ch. 5 (Replication) for leaderless/quorum durability reasoning; Ch. 6 (Partitioning) for rack-aware placement as a partitioning-with-anti-affinity constraint.*
+**3× replication is the right baseline** — simple, fast recovery (copy from a surviving replica), easy to reason about. Erasure coding (e.g. Reed-Solomon 6+3) cuts overhead 3× → ~1.5× but adds encode/decode compute, multi-node reconstruction on recovery, and messy partial-failure handling. And **dedup has already removed most redundancy**, so EC's savings are smaller here. Jumping straight to EC without the 3× baseline is a classic anti-signal.
+
+**Recovery.** Missed heartbeats (~30s silence) → service finds all chunks on the dead node, checks remaining replica counts, flags any below 3 as **under-replicated**. Re-replication reads from a surviving replica and copies to a new node in a different rack — **throttled** (cap concurrent copies per source node) and **prioritized** (a chunk down to one copy is more urgent than one with two). If the dead node returns post-recovery, its reported inventory is reconciled against the authoritative map and extra copies are marked **surplus** for later cleanup.
 
 ---
 
-## 7. Other Considerations (breadth to sprinkle if time allows)
+## 7. Other Considerations
 
-- **Metadata sharding:** hash-partition `objects`/`object_chunks` by `bucket_id` (nearly all access is bucket-scoped, keeps ops local to one shard). The `chunks` table is the awkward one — hashes span buckets. Shard by `chunk_hash` (even, but cross-shard PUTs need distributed txn / 2PC for ref counts) *or* keep it on a dedicated high-write cluster (hottest table) *or* swap for a KV store with atomic increment at extreme scale.
-- **Variable-length chunking:** fixed 64 MB breaks on a 1-byte prepend (every boundary shifts, all hashes change). Content-defined chunking (Rabin fingerprint / rolling hash) places boundaries by content, so only chunks around an edit change — big dedup win for revisions, incremental backups, patched binaries. Cost: more complex, variable sizes need min/max bounds.
-- **Storage tiering:** track last-access per chunk; migrate cold chunks (unread 90 d) from SSD data nodes to dense HDD / cold pools. Mirrors S3 Standard → IA → Glacier. Cold reads pay latency; PB-scale cold storage pays off hugely.
-- **Bit-rot / integrity:** per-node background **scrubber** re-reads each chunk, recomputes SHA-256, compares to the filename (its expected hash). Mismatch → notify metadata → replace from a healthy replica. Full-disk cycle every ~2 weeks. Content addressing makes the checksum free — the name *is* the checksum.
+- **Metadata sharding.** Shard `objects`/`object_chunks` by **`bucket_id`** (nearly all access is bucket-scoped → per-bucket ops stay local). The `chunks` table is trickier — hashes are cross-bucket. Shard by `chunk_hash` (even, but a multi-chunk PUT spanning shards needs a distributed txn / 2PC for ref-counts) *or* keep it on a dedicated high-write-throughput cluster (hottest table). At the extreme, replace it with a KV store offering atomic increment, trading joins for partition-level atomics.
+- **Variable-length chunking.** Fixed 64 MB has the boundary-shift problem: inserting one byte at the front re-hashes every chunk. Content-defined chunking (Rabin fingerprint / rolling hash) puts boundaries at content-determined positions, so a small edit changes only nearby chunks — big dedup wins for revisions / incremental backups / patched binaries. Cost: implementation complexity + variable chunk sizes (needs min/max bounds).
+- **Storage tiering.** Few objects get most reads. Track last-access per chunk; a background job migrates cold chunks (unread 90d) from SSD-backed hot nodes to dense-HDD cold pools (or tape/Glacier-like). Cold reads pay latency; PB-scale cold cost drops sharply — analogous to S3 Standard / IA / Glacier.
+- **Bit-rot detection.** Commodity disks silently corrupt. Each node runs a **scrubber** re-reading chunks and recomputing SHA-256; mismatch vs. the hash-filename ⇒ corrupt → replace from a healthy replica. Target a full-disk scrub interval (e.g. 2 weeks) to catch rot before it spreads to all replicas. Content addressing makes this free — the expected checksum *is* the filename.
 
 ---
 
 ## 🔍 Senior-Signal Questions to Ask in Your Interview
 
-- **"Is the GC grace window a global constant, or per-bucket based on observed max upload duration?"** → *Signals you've internalized that the window must dominate the longest check-then-commit gap, and that a single global value trades safety margin against reclaim latency.*
-- **"When we shard `chunks` by `chunk_hash`, do we accept 2PC on multi-shard PUTs, or relax ref-count atomicity to per-shard atomic increment?"** → *Shows you see the exact spot where the relational transaction guarantee breaks under partitioning — the CAP/consistency inflection point of the whole design.*
-- **"Do heartbeats also carry a generation/epoch so a flapping node's stale inventory can't overwrite the authoritative map?"** → *Signals fencing-token thinking — reconciliation after a node returns is a stale-writer hazard, not just a bookkeeping merge.*
-- **"At 50k read QPS, what's the Redis manifest hit rate we need before Postgres read replicas become the real bottleneck?"** → *Frames caching as a quantified back-pressure question rather than a reflexive 'add a cache' box.*
-- **"If we later add erasure coding for the cold tier, do we EC at the chunk level or re-stripe across chunks — and how does that interact with dedup's shared references?"** → *Demonstrates you understand EC and dedup compete for the same redundancy, and that mixing them changes the reference-accounting model.*
+- **"Should the manifest commit and the physical chunk uploads be one atomic unit, or is 'upload-then-commit with orphan GC' acceptable?"** → *Why it matters: shows you see the dual-write hazard and chose the transactional-outbox-style boundary (bytes durable first, manifest is the publish point) over a distributed transaction.*
+- **"What's the exact ordering guarantee between a DELETE's ref-count decrement and a concurrent PUT's existence-check-then-commit?"** → *Why it matters: forces the interviewer to see you understand the GC race isn't solved by ref-counting alone — the grace window bounds it, and you can name the concrete failure (dangling manifest → data loss).*
+- **"How do we bound re-replication traffic so recovery doesn't cascade into a second failure?"** → *Why it matters: back-pressure/throttling and replica-count prioritization are the difference between graceful recovery and a thundering-herd meltdown of surviving nodes.*
+- **"Is the `chunks` table's global ref-count our true scaling ceiling, and at what write QPS do we abandon relational atomicity for a KV atomic-increment?"** → *Why it matters: names the real inflection point and the CAP/consistency trade you'd make (cross-object txn safety vs. partition-level atomics).*
+- **"Given dedup already collapses redundancy, does erasure coding still pay for itself, or only for the cold, unique tail?"** → *Why it matters: demonstrates you reason about interactions between features (dedup × EC) rather than reaching for EC reflexively.*
