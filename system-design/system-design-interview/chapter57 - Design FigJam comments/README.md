@@ -277,11 +277,12 @@ flowchart LR
     end
 
     subgraph Storage["Storage · sharded by document_id"]
-        DB[(Comment DB<br/>threads · comments · events)]
+        DB[(Comment DB<br/>threads · comments · events · outbox)]
         Cache[[Thread Summary Cache]]
     end
 
     subgraph Bus["Fan-out"]
+        OB[Outbox Relay / CDC]
         MQ([Event Bus ·pub/sub by document_id·])
     end
 
@@ -289,9 +290,10 @@ flowchart LR
 
     C1 -->|"POST /comment-threads<br/>PATCH /comments"| LB
     LB -->|authz + write| CS
-    CS -->|"txn: row + event"| DB
+    CS -->|"one txn: row + event + outbox row"| DB
     CS -->|read-through| Cache
-    CS -->|"publish committed event"| MQ
+    OB -->|"tail/poll committed outbox rows"| DB
+    OB -->|"publish committed event"| MQ
     MQ -->|"document:{id}"| WSGW
     WSGW -->|"push events"| C1
     C1 -.->|"subscribe document:{id}<br/>+ last_applied_seq"| WSGW
@@ -302,7 +304,7 @@ flowchart LR
 
     classDef node fill:#eef2f7,stroke:#334155,color:#0f172a;
     classDef plane fill:#f8fafc,stroke:#94a3b8,color:#0f172a;
-    class C1,LB,WSGW,CS,NS,DB,Cache,MQ,ObjStream node;
+    class C1,LB,WSGW,CS,NS,DB,Cache,OB,MQ,ObjStream node;
     class Clients,Edge,CommentPlane,Storage,Bus plane;
     linkStyle default stroke:#1f2937,stroke-width:1.5px;
 ```
@@ -313,8 +315,9 @@ flowchart LR
 - **Comment DB** is sharded by `document_id`. All of a document's threads, comments, and events live on one shard, so the per-document total order and multi-row atomic writes are a **single-shard transaction** — no distributed commit. *(This is the DDIA Ch. 6/7 point: co-locate data that must be written atomically and ordered together under one partition key.)*
 - **Event Bus** fans out per `document_id`. **WebSocket gateways are stateless** — they hold connections and a subscription table, nothing authoritative. Any gateway can serve any client; state of record is the DB + event log.
 - **The object-edit stream is deliberately a separate system.** The comment client *reads* current object transforms from it to place the pin, but comments never write to it and don't share its CRDT machinery. The only coupling is referential: a comment stores an `object_id` + a document version.
+- **Comment Service does *not* publish to the bus directly.** It writes an **outbox row inside the same transaction** as the comment + event; the **Outbox Relay / CDC** then reads committed outbox rows and publishes to the bus. This closes the dual-write gap (crash after COMMIT but before publish would otherwise lose the fan-out and the notification). The relay is a separate process — a polling worker or a CDC connector tailing the DB log. *(Rationale in Deep Dive 2.)*
 
-**Callouts I'd make verbally and defer:** the thread-summary cache (for hot docs), the outbox pattern for the publish step, and log trimming/snapshotting — all pushed to Deep Dives so I don't over-build the first pass.
+**Callouts I'd make verbally and defer:** the thread-summary cache (for hot docs) and log trimming/snapshotting — pushed to Deep Dives so I don't over-build the first pass. I *do* draw the outbox relay in the base diagram rather than deferring it, because the direct-publish alternative is unsafe, not merely unoptimized — it's a correctness fix, not a scaling add-on.
 
 ---
 
