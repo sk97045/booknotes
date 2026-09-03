@@ -36,10 +36,23 @@
 
 ## 2. Core Entities (~2 min)
 
-- **ViewEvent** — `{ userId, itemId, ts }`; the raw ingested fact.
-- **CountBucket** — per-item, per-minute distinct-user count (the atom of the rolling window).
-- **ShardLocalTopN** — each counting shard's local top-N snapshot, emitted per minute.
-- **GlobalTopK** — the merged, served list; lives in cache.
+| Entity | Role | Example |
+|---|---|---|
+| **ViewEvent** | The raw ingested fact — one view. `userId` derived from auth token, not the body. | `{ userId: "u_8213", itemId: "file_A9f", ts: 1725360000 }` |
+| **CountBucket** | Per-item, per-minute distinct-user count — the atom of the rolling window. Keyed by `(itemId, minute)`. | `{ itemId: "file_A9f", minute: "2026-09-03T15:04", distinct: 342 }` |
+| **ShardLocalTopN** | One counting shard's local top-N snapshot, emitted every 60s. Partial, per-shard — this is `file_A9f`'s *full* daily estimate, since all its events live on shard B. | `{ shard: "B", asOf: 1725360240, top: [ {itemId:"file_A9f", est:20431}, {itemId:"file_3c1", est:9330}, … ] }` |
+| **GlobalTopK** | The merged, served list — what the read path returns. Interleaves top items from *different* shards (`file_A9f` from shard B, `search_kubernetes` from another); each score equals its owning shard's estimate — the merge reorders, never sums. Lives in cache, no TTL. | `{ asOf: 1725360240, items: [ {rank:1, itemId:"file_A9f", score:20431}, {rank:2, itemId:"search_kubernetes", score:18205}, … ] }` |
+
+Trace the same item (`file_A9f`) across the four stages. It lives entirely on **one shard** (shard B) because events partition by `itemId` — so its count is never split across shards. The score grows *only* at the shard roll-up (summing 1440 minute-buckets into a daily total); the merge step just places it in the global ranking and leaves the value unchanged:
+
+| Stage | Entity | What happens to `file_A9f` | Value |
+|---|---|---|---|
+| 1 · Ingest | **ViewEvent** | A single view arrives (after dedup, a new distinct user) | `{ userId:"u_8213", itemId:"file_A9f", ts:1725360000 }` |
+| 2 · Count | **CountBucket** | Folded into its per-minute distinct-user bucket on **shard B** | `{ itemId:"file_A9f", minute:"15:04", distinct:342 }` |
+| 3 · Shard roll-up | **ShardLocalTopN** | Shard B sums `file_A9f`'s 1440 buckets over 24h → daily estimate | `{ itemId:"file_A9f", est:20431 }` (rank 1 on shard B) |
+| 4 · Merge | **GlobalTopK** | Aggregator places shard B's entry into the global ranking — **value unchanged** | `{ rank:1, itemId:"file_A9f", score:20431 }` |
+
+> **Why the score is flat from stage 3 → 4:** the aggregator merges each shard's *top-N list* (disjoint items — shard A's hot files, shard B's, shard C's), it does **not** sum one item's count across shards. Since all of `file_A9f`'s events live on shard B, its global score equals shard B's estimate. The merge reorders and interleaves; it never adds.
 
 ---
 
@@ -127,7 +140,7 @@ Each shard maintains, per item:
 Events are **also** tee'd append-only into **NoSQL (Cassandra)** for durable replay — *"durability lives in the DB."*
 
 ### Aggregation
-Every minute, each shard computes its **local top-N** (N a few× larger than K, to protect against an item that's #(K+5) on many shards but globally top-K) and pushes it to an **Aggregator**. The aggregator merges the shard top-Ns into the **global top-K** via a bounded min-heap, then **writes the result into a distributed cache with no TTL.**
+Every minute, each shard computes its **local top-N** (N a few× larger than K) and pushes it to an **Aggregator**. Because events partition by `itemId`, each item's full count lives on one shard — so the aggregator merges **disjoint top-N lists** (different items from different shards) into one global ranking; it does *not* sum an item's count across shards. The generous N guards the real failure mode: an item that's globally top-K but ranks *below its own shard's* top-N — e.g. it landed on a shard that happens to own many hotter files — and would be culled locally before the aggregator ever sees it. The aggregator merges via a bounded min-heap, then **writes the result into a distributed cache with no TTL.**
 
 ### Read path — `GET /trending`
 Reads hit the **distributed cache directly** and never touch the counting tier. *"The cache is the source of truth for the read path, not a performance helper"* — with **no TTL**, a total collapse of the counting/aggregation tier just means the served list goes stale, not unavailable. That's the deliberate AP trade.
@@ -227,7 +240,7 @@ One viral file can dominate a single partition (hot shard). Two levers:
 ### 6e. Aggregator failure & correctness
 
 - Aggregator is **stateless** — it reads shard top-Ns and writes cache. On crash, a standby takes over; worst case the cache goes stale for one merge cycle (bounded by the no-TTL guarantee).
-- **Local top-N > K** (say N = 5K): guards the classic error where an item ranks just below each shard's cutoff yet is globally top-K. Larger N shrinks this risk at linear merge cost.
+- **Local top-N > K** (say N = 5K): an item's whole count lives on one shard, so the risk is that *that* shard's local top-N cutoff drops it (because the shard owns many hotter files) even though it's globally top-K. A generous N keeps such near-cutoff items in the report. Larger N shrinks this risk at linear merge cost.
 - **Exact backfill:** because raw events are in Cassandra append-only, we can recompute an authoritative top-K offline to audit sketch drift — *"let the sketch serve the read; let the log tell the truth."*
 
 ---
@@ -245,6 +258,6 @@ One viral file can dominate a single partition (hot shard). Two levers:
 - **"Is the trending signal raw views or distinct viewers — and are we OK under-counting distinct users via Bloom false positives?"** → *Why it matters: forces the interviewer to commit to the dedup semantics before you pick a structure; shows you know Bloom under-counts and CMS over-counts and that the bias direction is a design choice, not an accident.*
 - **"What's the acceptable staleness on the read path — is a 60-second-old list fine if it means the read survives a counting-tier outage?"** → *Why it matters: surfaces the explicit AP/availability trade and the no-TTL cache decision (DDIA Ch. 9).*
 - **"Rolling window or fixed calendar day — does a view at 23:59 fall out of the window at 00:00, or 24h later?"** → *Why it matters: the notes call this out specifically — the window/refresh boundary decides the whole aggregation path (per-minute ring vs. truncated counter).*
-- **"How large do we make each shard's local top-N relative to global K?"** → *Why it matters: names the concrete failure mode — an item just below every shard's local cutoff that's globally top-K — and shows you understand mergeability of partial top-Ns.*
+- **"How large do we make each shard's local top-N relative to global K?"** → *Why it matters: names the concrete failure mode — an item whose owning shard is crowded with hotter files, so it falls below that shard's local cutoff despite being globally top-K — and shows you understand mergeability of disjoint per-shard top-Ns.*
 - **"Should we sample the hottest items' events to shed load, given rank is insensitive to exact count?"** → *Why it matters: volunteering event-frequency sampling is the intended optimization and signals you optimize the tail that actually hurts (hot shards), not uniformly.*
 - **"Do we need an offline exact recompute from the raw log to audit sketch drift?"** → *Why it matters: shows you treat the append-only log as ground truth and the sketch as a serving approximation — the durability/approximation split.*
