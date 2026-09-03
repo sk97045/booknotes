@@ -184,7 +184,7 @@ WS     document:{documentId}                          # live subscribe (after au
 
 ## 4. Data Flow (~5 min)
 
-The system has three distinct flows worth enumerating as ordered pipelines, because the ordering *is* the design:
+The system has **four** distinct flows worth enumerating as ordered pipelines, because the ordering *is* the design:
 
 **A. Write path (create/reply/edit/resolve):**
 1. Client `POST`s with token (+ optional `expected_version`).
@@ -208,6 +208,51 @@ The system has three distinct flows worth enumerating as ordered pipelines, beca
 1. A committed `COMMENT_CREATED` event with mentions is consumed by the Notification Service.
 2. It re-checks that each mentioned user can access the document (ACLs change).
 3. Dedupe delivery by `(event_id, recipient_id)`, then emit email/push/in-app.
+
+The four pipelines aren't independent — they chain off a single committed write. This diagram traces one comment from `POST` through commit (A), out to other viewers via the outbox + bus (B), into notifications (D), and shows a second client picking it up on reconnect (C):
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A1 as Author Client
+    participant CS as Comment Service
+    participant DB as Comment DB
+    participant OB as Outbox Relay / CDC
+    participant MQ as Event Bus per doc
+    participant GW as WS Gateway
+    participant V1 as Viewer Client live
+    participant NS as Notification Svc
+    participant V2 as Viewer reconnecting
+
+    Note over A1,DB: A. Write path
+    A1->>CS: POST comment (token, expected_version?)
+    CS->>CS: authorize ACL + validate object exists
+    CS->>DB: BEGIN — row(s) + CommentEvent(seq N) + outbox row — COMMIT
+    CS-->>A1: ack seq N (read-your-writes)
+
+    Note over OB,V1: B. Live fan-out (at-least-once)
+    OB->>DB: poll committed outbox rows
+    OB->>MQ: publish event N
+    MQ->>GW: document:{id} event N
+    GW->>V1: push event N
+    V1->>V1: dedupe by event_id, apply in seq order
+
+    Note over MQ,NS: D. Notifications (async, off critical path)
+    MQ->>NS: mention/reply event N
+    NS->>NS: recheck each recipient's doc access
+    NS-->>V1: deliver, dedupe by (event_id, recipient_id)
+
+    Note over V2,GW: C. Reconnect / catch-up
+    V2->>GW: reconnect, last_applied_sequence = M
+    alt M within retained log
+        GW-->>V2: events after M (incl. N)
+    else M below trim horizon
+        GW-->>V2: snapshot + tail
+    end
+    V2->>V2: apply, then resume live subscription
+```
+
+The load-bearing detail the diagram makes visible: the **ack to the author (A) happens right after COMMIT, before any fan-out** — so durability never depends on B/C/D succeeding. Everything downstream is at-least-once replay off the committed log, which is exactly why both consumers dedupe (`event_id` for viewers, `(event_id, recipient_id)` for notifications).
 
 ---
 
