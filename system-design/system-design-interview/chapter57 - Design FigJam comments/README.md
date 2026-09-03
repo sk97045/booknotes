@@ -180,6 +180,22 @@ WS     document:{documentId}                          # live subscribe (after au
 
 **⚠️ Divergence from passing design (minor, worth stating):** the candidate lists `PATCH`/`DELETE` returning a sequence number implicitly. I'd make the **returned `sequence_number` an explicit part of every write response**, because it's the mechanism that makes read-your-writes work on reconnect — it's not just a debugging aid. Same design, sharper articulation.
 
+### Transport choice: WebSocket vs SSE
+
+Worth surfacing unprompted, because the reflexive "WebSocket = real-time" answer misses a real tradeoff. Comment **writes go over REST** (`POST`/`PATCH`), so the live channel is **pure server→client fan-out** — which is exactly what **SSE (Server-Sent Events)** is built for. SSE's native `Last-Event-ID` header maps directly onto our `sequence_number`: set each event's `id:` to the sequence number, and on reconnect the browser auto-resends `Last-Event-ID`, so the catch-up flow ("replay events after N") is *free* instead of hand-rolled.
+
+| | WebSocket | SSE |
+|---|---|---|
+| Direction | Bidirectional | Server→client only |
+| Comment writes | (unused — go via REST anyway) | Go via REST |
+| Reconnect + catch-up | Hand-rolled (`last_applied_sequence`) | **Native** (`Last-Event-ID` ↔ `sequence_number`) |
+| Auto-reconnect | You build it | Built in |
+| Payload | Text + binary | Text only |
+| Connection cap | 1 per client | ~6/domain on HTTP/1.1; fine on HTTP/2 |
+| Best when | Platform already needs bidirectional (multiplayer) | Pure fan-out feeds — **comments in isolation** |
+
+**So why does this design pick WebSocket?** Because comments live *inside* Figma, which already runs a persistent WebSocket for multiplayer object editing, presence, and cursors — all genuinely bidirectional and latency-critical. We **multiplex comment events onto that existing socket** rather than opening a second SSE stream per client. The choice is driven by **platform reuse**, not by comments in isolation. For a *standalone* commenting system I'd default to SSE and reach for WebSocket only if a requirement forced bidirectional or binary. Naming *that* reason — rather than "WebSocket because real-time" — is the senior signal.
+
 ---
 
 ## 4. Data Flow (~5 min)
@@ -457,6 +473,132 @@ A subtle correctness hole: authorization is checked on subscribe, but a user can
 - **Log trimming + snapshots:** the `CommentEvent` log can't grow forever. Retain enough tail for realistic reconnect windows; archive older events. A client that's been offline past the trim horizon gets a **snapshot + tail** instead of a full replay (Section 4-C). Monitor **reconnect catch-up size** — a rising distribution means the trim horizon is too aggressive for real offline durations.
 
 **What I'd monitor:** event lag (commit → fan-out delivery), reconnect catch-up size distribution, WebSocket fan-out p99, notification delivery failures, and authorization-failure rate (a spike may mean an ACL propagation bug). These five map directly to the five things that can silently break.
+
+---
+
+### Deep Dive 6 — WebSocket reconnect + catch-up flow
+
+This is the most likely deep-dive probe after the realtime design is drawn: *"what exactly happens when a client's WebSocket drops and someone writes to the document during the gap?"*
+
+**Setup:**
+- Bob has doc:42 open, connected to Gateway G1, `last_applied_sequence = 10`
+- Bob's connection drops
+- Alice posts a comment (`seq=11`) and resolves the thread (`seq=12`) while Bob is offline
+
+**Key point before the trace — `last_applied_sequence` is document-level, not per-thread or per-comment.** One monotonically increasing counter across all threads and comments in the document. This is what makes catch-up a single query rather than N per-thread queries, and it's what ensures Bob automatically learns about brand-new threads created while he was offline — he doesn't need to know they exist to ask for them.
+
+```
+doc:42 event log — what the counter actually sequences:
+
+seq=1   THREAD_CREATED    t1
+seq=2   COMMENT_CREATED   c1 on t1   (Alice)
+seq=3   THREAD_CREATED    t2         ← different thread, same counter
+seq=4   COMMENT_CREATED   c2 on t1   (Bob)    ← Bob's last_applied_sequence
+seq=5   THREAD_RESOLVED   t2
+seq=6   COMMENT_CREATED   c3 on t2   (Carol)
+```
+
+Bob at `seq=4` has seen t1, t2, Alice's comment, his own reply — but not the resolve or Carol's comment. One number covers the entire document.
+
+**The reconnect sequence — six phases:**
+
+**Phase 1 — drop detected:**
+```
+Bob's WS to G1 drops
+G1 removes Bob from subscription table
+Bob's app detects disconnect, holds last_applied_sequence=10
+```
+
+**Phase 2 — Alice writes during the gap:**
+```
+Alice: POST comment     → CS writes seq=11 to DB + outbox
+Alice: POST :resolve    → CS writes seq=12 to DB + outbox
+Outbox relay publishes seq=11, seq=12 to Kafka doc:42
+G1 receives both, pushes to other connected viewers
+Bob not in G1's subscription table → skipped
+```
+
+**Phase 3+4 — Bob reconnects and sends position:**
+```
+Bob auto-reconnects → LB routes to G2 (any healthy gateway)
+Bob → G2: WS handshake + auth token
+G2: validates token, authorizes doc:42
+Bob → G2: { subscribe: "document:doc:42", last_applied_sequence: 10 }
+```
+
+**Phase 5 — G2 fetches the gap:**
+```
+G2 → CS: GET /comment-events?afterSequence=10
+CS: SELECT * FROM comment_events
+    WHERE document_id='doc:42' AND sequence_number > 10
+    ORDER BY sequence_number ASC
+→ returns seq=11 (COMMENT_CREATED), seq=12 (THREAD_RESOLVED)
+```
+
+**Phase 6 — replay + resume live:**
+```
+G2 → Bob: seq=11 COMMENT_CREATED  (Alice's comment)
+G2 → Bob: seq=12 THREAD_RESOLVED  (thread resolved)
+Bob: applies both, last_applied_sequence=12
+G2: subscribes Bob to live Kafka stream from seq=13 onwards
+```
+
+```mermaid
+sequenceDiagram
+    participant B as Bob Client
+    participant G1 as Gateway G1
+    participant G2 as Gateway G2
+    participant CS as Comment Service
+    participant DB as Comment DB
+    participant A as Alice Client
+
+    Note over B,G1: Phase 1 - Connection drops
+    G1-->>B: TCP close
+    B->>B: detect disconnect, last_seq=10
+
+    Note over A,DB: Phase 2 - Alice writes while Bob offline
+    A->>CS: POST comment (seq=11)
+    CS->>DB: write row + event seq=11 + outbox
+    CS-->>A: ack seq=11
+    A->>CS: POST resolve (seq=12)
+    CS->>DB: write row + event seq=12 + outbox
+    CS-->>A: ack seq=12
+    Note over G1: pushes seq=11,12 to other viewers
+    Note over G1: Bob not subscribed - skipped
+
+    Note over B,G2: Phase 3+4 - Bob reconnects
+    B->>G2: WS handshake + auth token
+    G2->>G2: validate token, authorize doc:42
+    B->>G2: subscribe doc:42, last_applied_sequence=10
+
+    Note over G2,DB: Phase 5 - Fetch gap from DB
+    G2->>CS: GET /comment-events?afterSequence=10
+    CS->>DB: SELECT events WHERE seq > 10
+    DB-->>CS: seq=11 seq=12
+    CS-->>G2: events seq=11 seq=12
+
+    Note over G2,B: Phase 6 - Replay gap then resume live
+    G2-->>B: seq=11 COMMENT_CREATED
+    G2-->>B: seq=12 THREAD_RESOLVED
+    B->>B: apply seq=11 seq=12, last_seq=12
+    G2->>G2: subscribe Bob to live stream from seq=13
+```
+
+**Two edge cases to name proactively:**
+
+**1. Event arrives during the gap-fetch window (seq=13 lands while G2 is fetching seq=10→12):**
+G2 must **subscribe Bob to the live stream first, then replay the gap** — not the other way around. Any live event buffered during replay is applied after; deduped by `event_id` if it overlaps. If you replay first then subscribe, `seq=13` can arrive during the subscribe setup and be silently dropped.
+
+**2. Bob's `last_seq` is below the log trim horizon (offline for a week):**
+```
+G2 → CS: GET /comment-events?afterSequence=10
+CS: seq=10 is below trim horizon
+CS returns: full snapshot of current materialized state
+            + tail events from trim horizon onwards
+Bob: applies snapshot first, then tail events on top
+```
+
+Bob ends up in the same state as a fresh load — current sidebar, current thread states — without replaying the entire history. The snapshot is just the materialized `CommentThread` + `Comment` tables read at a point in time.
 
 ---
 
